@@ -21,28 +21,16 @@
 
 
 ```sh
-dsh plugin --profile web add github:OWNER/dsh-thu-automad   # 把 OWNER 换成你的 GitHub 用户名
+dsh plugin --profile web add github:aaabrli/dsh-thu-automad
 ```
 
-bundle 层会连 `tsinghua` provider 路由一起写进 composition，装完 **设置 → 模型** 里就有「清华 DeepSeek」，不需要手写配置。然后打开 **设置 → 清华 MadModel**，填学号、填统一认证口令，各保存一次；本机第一次登录时，下一次续期会弹二次验证对话框。
+或者点击左侧插件按钮，选择添加插件，输入本项目地址安装。
 
-> 首次让浏览器半边生效需要重启一次 `dsh web`——客户端扫描会把"这个包有没有 `dsh.client`"的结论缓存到进程结束。
+## 使用
 
-从 checkout 开发时，宿主半边走源码：
-
-```sh
-pnpm dsh web --patch ./thu-automad/dev.overlay.yml
-cd thu-automad && ../node_modules/.bin/tsdown --watch   # 改了 src/client/ 要重新构建
-```
-
-全部配置字段与规则语义，见包内 `cordis.patch.yml` 的注释和 `src/config.ts` 的默认值。
+插件在设置中添加了配置页面，输出用户名/学号及密码后点击立即续期即可使用清华madmodel，首次使用需完成设备验证。
 
 ## 隐私
 
 口令与 token 存在 `$DSH_HOME/.credentials.yaml`，**明文 YAML**，保护手段只有文件权限（`0600`，同目录 `0700`）与跨进程文件锁——**没有 Keychain、没有加密**。状态接口只回传状态与时间戳，不含 token、学号、口令或设备指纹。这个取舍不可接受，就不要在这个 profile 里配置口令。
 
-## 验证
-
-```sh
-cd thu-automad && pnpm run check     # 类型检查 + 构建 + 三个离线 smoke
-```
