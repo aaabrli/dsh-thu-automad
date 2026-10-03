@@ -1,0 +1,54 @@
+/**
+ * Local typecheck for this out-of-tree plugin. It is not part of the harness
+ * workspace, so it reuses the checkout's compiler shape and resolves the
+ * harness types it writes against itself:
+ *
+ *   pnpm exec tsc -p thu-automad
+ *
+ * `paths` names the artifact plane, not the source plane: an out-of-tree plugin
+ * is a consumer of the harness, so it compiles against the declarations the
+ * checkout publishes, exactly as an installed copy would. Every entry here is a
+ * package this plugin imports directly; a transitive import resolves through
+ * the owning package's own `node_modules`, which pnpm already links.
+ *
+ * `typeRoots` adds pnpm's hoisted store directory because React's declarations
+ * sit there rather than in the repository root's `@types`.
+ *
+ * `checks/` is deliberately outside this program: those files drive the real
+ * plugin against stub Contexts, and no stub Context is a Context. They are
+ * executed by tsx (which strips types without checking them), so a type error
+ * there would be a claim about the stub, not about shipped code.
+ */
+{
+  "extends": "../tsconfig.base.client.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rewriteRelativeImportExtensions": false,
+    "types": ["node"],
+    "typeRoots": [
+      "../node_modules/.pnpm/node_modules/@types",
+      "../node_modules/@types",
+      "../scripts/types"
+    ],
+    "paths": {
+      "@deepseek-ai/cordis": ["../vendor/cordis/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-agent": ["../packages/core/agent/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-credentials": ["../packages/credentials/credentials/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-llm": ["../packages/llm/llm/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-client-connection": ["../packages/client/connection/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-user-questions": ["../packages/interaction/user-questions/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-slots": ["../packages/client/ui-slots/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-client-locale/client": ["../packages/client/locale/lib/types/client/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-conversation/client": ["../packages/client/ui-conversation/lib/types/client/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-layout/client": ["../packages/client/ui-layout/lib/types/client/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-renderer/client": ["../packages/client/ui-renderer/lib/types/client/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-primitives": ["../packages/client/ui-primitives/lib/types/index.d.ts"],
+      "@deepseek-ai/dsh-client-ui-settings/client": ["../packages/client/ui-settings/lib/types/client/index.d.ts"]
+    }
+  },
+  "include": ["src", "tsdown.config.ts"]
+}

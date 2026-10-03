@@ -1,0 +1,6 @@
+{
+  "name": "thu-automad-vendored-madmodel-auth",
+  "private": true,
+  "description": "Marks this directory as CommonJS so the byte-identical vendored chain loads through createRequire despite the owning package declaring \"type\": \"module\".",
+  "type": "commonjs"
+}

@@ -1,0 +1,140 @@
+# Bundle patch layer: two rows are contributed here. The first loads this
+# package's Host entry as a plain Cordis plugin — the `dsh.client` declaration in
+# package.json makes the Web application load ./client as the browser half, so no
+# second row is needed. The second supplies the provider route this plugin exists
+# to keep authenticated, so installing the bundle is enough to make `tsinghua`
+# selectable without hand-writing a profile row.
+#
+# Installed into a profile, the bare package name resolves from the profile's
+# own node_modules. Developing from a checkout, use dev.overlay.yml instead,
+# whose row names the absolute source path.
+#
+# The rule list below is the one this plugin exists to make expressible: a
+# credential refusal is no longer terminal, because `renew` re-authenticates and
+# retries; the gateway's other failure modes still ask.
+- insert:
+    - id: thu-automad
+      name: dsh-thu-automad
+      config:
+        # The credential the provider reads, and the one renewal replaces.
+        credentialRef: TSINGHUA_API_KEY
+        label: 清华 DeepSeek
+        # Amber 30 minutes before expiry; renew an hour before, so an ordinary
+        # cycle never paints the pill amber on its way to green.
+        warnBeforeMs: 1800000
+        refreshAheadMs: 3600000
+        # Where the identity an unattended renewal signs in with is stored.
+        # Both are filled in from 设置 → 清华 MadModel.
+        usernameRef: MADMODEL_USERNAME
+        passwordRef: MADMODEL_PASSWORD
+        # Set true when the upstream check has to go through the school's
+        # WebVPN tunnel.
+        tunnel: false
+        rules:
+          # A credential the gateway refuses is exactly what renewal is for:
+          # sign in again, and retry with the new token if that worked.
+          - when: { provider: [ tsinghua ], code: [ AUTH ] }
+            action: renew
+            # Only consulted when the user answers this rule's question with a
+            # switch; the renewal's own answer is always a retry.
+            cooldownMs: 300000
+            onFailure: ask
+            ask:
+              question: "清华 token 续期没成功（{code}）。这次怎么走？"
+              choices:
+                - { label: "再试一次", action: retry }
+                - {
+                    label: "切到 deepseek-official",
+                    action: switch,
+                    to: { provider: deepseek-official, model: deepseek-flash }
+                  }
+                - { label: "这次放弃", action: fail }
+              timeoutMs: 120000
+              # A delegated child has no human answerer and would wait forever.
+              unavailable: { label: "放弃这一轮", action: fail }
+          # 工具调用被截断：先让 llm-retry 自己扛满预算，用尽后才问人。
+          - when: { provider: [ tsinghua ], code: [ PI_AI_ERROR ] }
+            action: ask
+            afterRetries: 5
+            cooldownMs: 300000
+            ask:
+              question: "清华网关把 tool call 参数截断了（{code}），自动重试已用尽。这次怎么走？"
+              choices:
+                - { label: "继续重试清华", action: retry }
+                - {
+                    label: "切到 deepseek-official",
+                    action: switch,
+                    to: { provider: deepseek-official, model: deepseek-flash }
+                  }
+                - { label: "这次放弃", action: fail }
+              timeoutMs: 120000
+              unavailable: { label: "放弃这一轮", action: fail }
+          # 另外两种形态：nginx 回 502，或流刚打开就断（零产出）。
+          - when: { provider: [ tsinghua ], code: [ SERVER, TRANSPORT ] }
+            action: ask
+            cooldownMs: 300000
+            ask:
+              question: "清华网关请求失败（{code}）。这次怎么走？"
+              choices:
+                - { label: "继续重试清华", action: retry }
+                - {
+                    label: "切到 deepseek-official",
+                    action: switch,
+                    to: { provider: deepseek-official, model: deepseek-flash }
+                  }
+                - { label: "这次放弃", action: fail }
+              timeoutMs: 120000
+              # 无人应答时不静默切走：deepseek-official 由基础 bundle 提供，但它要
+              # DEEPSEEK_API_KEY，纯清华用户没有；自动切过去只会把一次网关故障换成
+              # 一条 MISSING_CREDENTIAL。停下来比换到一个没有凭据的路由好排查。
+              unavailable: { label: "放弃这一轮", action: fail }
+
+# 这个 bundle 存在的理由就是让 `tsinghua` 这条路由一直有凭据可用，所以路由本身
+# 也由这一层提供：装上 bundle 就有一个可选的 tsinghua，不必再手写 profile 行。
+#
+# 覆盖语义是**整行替换 config**（不是深合并），所以下面必须写出完整的 providers
+# 字典。基础 bundle 里 `llm-pi-ai` 那一行本来就没有 config（它以 dormant 姿态挂载，
+# 等 composition 或用户设置提供 profiles），因此这一层不覆盖掉任何东西。
+#
+# 层序仍然由用户掌握：profile 自己的 cordis.patch.yml 在 bundle 层之后应用，会整体
+# 替换这里的 config；llm-pi-ai 的用户设置层（模型设置页写的那个）再按 provider
+# 逐条合并。想彻底关掉这条路由，在自己的 patch 里写
+# `- { id: llm-pi-ai, config: { providers: {} } }` 即可。
+- id: llm-pi-ai
+  config:
+    providers:
+      tsinghua:
+        displayName: 清华 DeepSeek
+        # 与上面 thu-automad 的 credentialRef 是同一个引用：provider 每请求从
+        # credentials seam 解析它，续期把新 token 写回同一个引用，两边自动接上。
+        apiKeyEnv: TSINGHUA_API_KEY
+        api: openai-completions
+        # 只决定模型请求的落点。插件的取票链与上游验证调用走的是 src/auth/chain.ts
+        # 里写死的 SITE（同一个主机），改这里不会改变它们——两者今天一致，但没有
+        # 校验，换主机时两边都要动。
+        baseURL: https://madmodel.cs.tsinghua.edu.cn/v1
+        compat:
+          supportsDeveloperRole: false
+          maxTokensField: max_tokens
+        reasoning: high
+        # PI_AI_ERROR 是网关把 tool call 参数截断时 pi-ai 的兜底码。上面那条
+        # `afterRetries: 5` 规则的前提就是 llm-retry 会重试它，所以这里必须留着；
+        # 少了它，规则会在第一次失败就把问题推给人。
+        retryPolicy:
+          mode: normal
+          maxRetries: 5
+          retryableCodes: [ EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT, PI_AI_ERROR ]
+          backoff:
+            initialDelayMs: 500
+            maxDelayMs: 10000
+            jitterRatio: 0.1
+        models:
+          - id: DeepSeek-V4.1-Flash
+            name: DeepSeek V4.1 Flash
+            contextWindow: 1000000
+            input: [ text, image ]
+            reasoningEfforts:
+              off: none
+              low: low
+              high: high
+              max: max

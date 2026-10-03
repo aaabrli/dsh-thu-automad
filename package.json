@@ -1,0 +1,51 @@
+{
+  "name": "dsh-thu-automad",
+  "version": "0.1.0",
+  "description": "Tsinghua MadModel automation for the dsh Web UI: watch the campus token's JWT expiry, renew it unattended through the school's authentication chain, and decide what a failed model request does next.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "lib",
+    "src",
+    "vendor",
+    "cordis.patch.yml",
+    "dev.overlay.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p tsconfig.json",
+    "check:host": "tsx checks/host-smoke.ts",
+    "check:policy": "tsx checks/policy-smoke.ts",
+    "check:client": "tsx checks/client-smoke.ts",
+    "check": "pnpm run typecheck && pnpm run build && pnpm run check:host && pnpm run check:policy && pnpm run check:client"
+  },
+  "license": "MIT"
+}

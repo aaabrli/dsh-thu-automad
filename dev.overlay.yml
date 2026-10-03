@@ -1,0 +1,55 @@
+# Development overlay for a checkout that owns this plugin.
+#
+#   pnpm dsh web --patch ./thu-automad/dev.overlay.yml
+#
+# The row names the Host entry relative to this file, so it loads straight from
+# src/ through the checkout's tsx hook. The browser half still comes from the
+# built bundle, because the client scan reads `exports["./client"]` from
+# package.json: run `pnpm --dir thu-automad build` (or `tsdown --watch`) after
+# changing anything under src/client/.
+- insert:
+    - id: thu-automad
+      name: ./src/index.ts
+      config:
+        credentialRef: TSINGHUA_API_KEY
+        label: 清华 DeepSeek
+        warnBeforeMs: 1800000
+        refreshAheadMs: 3600000
+        usernameRef: MADMODEL_USERNAME
+        passwordRef: MADMODEL_PASSWORD
+        tunnel: false
+        rules:
+          - when: { provider: [ tsinghua ], code: [ AUTH ] }
+            action: renew
+            cooldownMs: 300000
+            onFailure: ask
+            ask:
+              question: "清华 token 续期没成功（{code}）。这次怎么走？"
+              choices:
+                - { label: "再试一次", action: retry }
+                - {
+                    label: "切到 deepseek-official",
+                    action: switch,
+                    to: { provider: deepseek-official, model: deepseek-flash }
+                  }
+                - { label: "这次放弃", action: fail }
+              timeoutMs: 120000
+              unavailable: { label: "放弃这一轮", action: fail }
+          - when: { provider: [ tsinghua ], code: [ SERVER, TRANSPORT ] }
+            action: ask
+            cooldownMs: 300000
+            ask:
+              question: "清华网关请求失败（{code}）。这次怎么走？"
+              choices:
+                - { label: "继续重试清华", action: retry }
+                - {
+                    label: "切到 deepseek-official",
+                    action: switch,
+                    to: { provider: deepseek-official, model: deepseek-flash }
+                  }
+                - { label: "这次放弃", action: fail }
+              timeoutMs: 120000
+              # 无人应答时不静默切走：deepseek-official 由基础 bundle 提供，但它要
+              # DEEPSEEK_API_KEY，纯清华用户没有；自动切过去只会把一次网关故障换成
+              # 一条 MISSING_CREDENTIAL。停下来比换到一个没有凭据的路由好排查。
+              unavailable: { label: "放弃这一轮", action: fail }
