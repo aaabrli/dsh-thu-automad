@@ -48,8 +48,6 @@ export interface RuleSummary {
   code: readonly string[]
   /** Configured action. */
   action: string
-  /** Configured switch cooldown in milliseconds. */
-  cooldownMs: number
   /** Configured delegated-failure budget that precedes this rule's action. */
   afterRetries: number
   /** Configured fallback for `action: renew`; absent for every other action. */
@@ -130,7 +128,6 @@ export class StatusLedger {
         provider: rule.provider,
         code: rule.code,
         action: rule.action,
-        cooldownMs: rule.cooldownMs,
         afterRetries: rule.afterRetries,
         ...rule.onFailure === undefined ? {} : { onFailure: rule.onFailure },
       })),

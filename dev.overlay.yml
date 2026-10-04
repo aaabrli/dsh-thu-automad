@@ -21,7 +21,6 @@
         rules:
           - when: { provider: [ tsinghua ], code: [ AUTH ] }
             action: renew
-            cooldownMs: 300000
             onFailure: ask
             ask:
               question: "清华 token 续期没成功（{code}）。这次怎么走？"
@@ -37,7 +36,6 @@
               unavailable: { label: "放弃这一轮", action: fail }
           - when: { provider: [ tsinghua ], code: [ SERVER, TRANSPORT ] }
             action: ask
-            cooldownMs: 300000
             ask:
               question: "清华网关请求失败（{code}）。这次怎么走？"
               choices:

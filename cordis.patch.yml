@@ -12,6 +12,9 @@
 # The rule list below is the one this plugin exists to make expressible: a
 # credential refusal is no longer terminal, because `renew` re-authenticates and
 # retries; the gateway's other failure modes still ask.
+#
+# Nothing is remembered between failures: every one walks these rules again, so
+# a long outage asks each time instead of switching the model on its own.
 - insert:
     - id: thu-automad
       name: dsh-thu-automad
@@ -35,9 +38,6 @@
           # sign in again, and retry with the new token if that worked.
           - when: { provider: [ tsinghua ], code: [ AUTH ] }
             action: renew
-            # Only consulted when the user answers this rule's question with a
-            # switch; the renewal's own answer is always a retry.
-            cooldownMs: 300000
             onFailure: ask
             ask:
               question: "清华 token 续期没成功（{code}）。这次怎么走？"
@@ -56,7 +56,6 @@
           - when: { provider: [ tsinghua ], code: [ PI_AI_ERROR ] }
             action: ask
             afterRetries: 5
-            cooldownMs: 300000
             ask:
               question: "清华网关把 tool call 参数截断了（{code}），自动重试已用尽。这次怎么走？"
               choices:
@@ -72,7 +71,6 @@
           # 另外两种形态：nginx 回 502，或流刚打开就断（零产出）。
           - when: { provider: [ tsinghua ], code: [ SERVER, TRANSPORT ] }
             action: ask
-            cooldownMs: 300000
             ask:
               question: "清华网关请求失败（{code}）。这次怎么走？"
               choices:

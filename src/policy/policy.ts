@@ -55,35 +55,7 @@ export function substitute(text: string, values: Readonly<Record<string, string>
 export class StepRoutes {
   private readonly overrides = new Map<string, { to: Route; at: number }>()
   private readonly owned = new Map<string, number>()
-  private readonly cooldowns = new Map<string, { to: Route; until: number }>()
   private readonly failures = new Map<string, { count: number; at: number }>()
-
-  /**
-   * Remember that one provider was switched away from, so later failures on it
-   * keep the same target instead of asking again.
-   * @param provider - the provider that failed.
-   * @param to - the route the switch went to.
-   * @param until - epoch milliseconds the memory expires at.
-   */
-  rememberSwitch(provider: string, to: Route, until: number): void {
-    this.cooldowns.set(provider, { to, until })
-  }
-
-  /**
-   * Read a live switch memory for one provider.
-   * @param provider - the provider that is failing.
-   * @param now - current epoch milliseconds.
-   * @returns the route to reuse, or undefined when there is no live memory.
-   */
-  cooldownFor(provider: string, now: number): Route | undefined {
-    const entry = this.cooldowns.get(provider)
-    if (entry === undefined) return undefined
-    if (now >= entry.until) {
-      this.cooldowns.delete(provider)
-      return undefined
-    }
-    return entry.to
-  }
 
   /**
    * Record the route the next attempt of one step must use.

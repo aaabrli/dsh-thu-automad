@@ -66,15 +66,6 @@ export interface Rule {
   /** Required by `action: 'ask'`, and by `action: 'renew'` with `onFailure: 'ask'`. */
   ask?: AskSpec
   /**
-   * How long a resolved `switch` for this rule's provider keeps applying
-   * without consulting the rule again.
-   *
-   * Without it, an outage that spans many turns asks again every turn; with
-   * it, one answered switch carries the rest of the outage. Zero asks every
-   * time.
-   */
-  cooldownMs: number
-  /**
    * How many failures of one turn-and-step this rule leaves to whatever else
    * owns retries before it acts at all.
    *
@@ -106,7 +97,7 @@ const DEFAULT_TIMEOUT_MS = 120_000
 const CHOICE_ACTIONS: readonly string[] = ['retry', 'switch', 'fail']
 const RULE_ACTIONS: readonly string[] = [...CHOICE_ACTIONS, 'ask', 'renew']
 const FALLBACK_ACTIONS: readonly string[] = [...CHOICE_ACTIONS, 'ask']
-const RULE_KEYS: readonly string[] = ['when', 'action', 'to', 'ask', 'cooldownMs', 'afterRetries', 'onFailure']
+const RULE_KEYS: readonly string[] = ['when', 'action', 'to', 'ask', 'afterRetries', 'onFailure']
 
 /** Message prefix every rule-validation error carries, so the failing field is unambiguous. */
 const PREFIX = 'thu-automad: rules'
@@ -140,7 +131,6 @@ function rule(value: unknown, path: string): Rule {
   const action = member(record.action, RULE_ACTIONS, `${path}.action`)
   const provider = names(when.provider, `${path}.when.provider`)
   const code = names(when.code, `${path}.when.code`)
-  const cooldownMs = cooldown(record.cooldownMs, `${path}.cooldownMs`)
   const afterRetries = budget(record.afterRetries, `${path}.afterRetries`)
 
   if (action === 'renew') {
@@ -150,15 +140,15 @@ function rule(value: unknown, path: string): Rule {
     const onFailure = member(record.onFailure, FALLBACK_ACTIONS, `${path}.onFailure`) as FallbackAction
     if (onFailure === 'switch') {
       if (record.ask !== undefined) throw new Error(`${PREFIX}: ${path}.ask is only valid for action "ask"`)
-      return { provider, code, action, to: route(record.to, `${path}.to`), cooldownMs, afterRetries, onFailure }
+      return { provider, code, action, to: route(record.to, `${path}.to`), afterRetries, onFailure }
     }
     if (onFailure === 'ask') {
       if (record.to !== undefined) throw new Error(`${PREFIX}: ${path}.to is only valid for a "switch" target`)
-      return { provider, code, action, ask: askSpec(record.ask, `${path}.ask`), cooldownMs, afterRetries, onFailure }
+      return { provider, code, action, ask: askSpec(record.ask, `${path}.ask`), afterRetries, onFailure }
     }
     if (record.to !== undefined) throw new Error(`${PREFIX}: ${path}.to is only valid for a "switch" target`)
     if (record.ask !== undefined) throw new Error(`${PREFIX}: ${path}.ask is only valid for action "ask"`)
-    return { provider, code, action, cooldownMs, afterRetries, onFailure }
+    return { provider, code, action, afterRetries, onFailure }
   }
 
   if (record.onFailure !== undefined) {
@@ -166,24 +156,15 @@ function rule(value: unknown, path: string): Rule {
   }
   if (action === 'switch') {
     if (record.ask !== undefined) throw new Error(`${PREFIX}: ${path}.ask is only valid for action "ask"`)
-    return { provider, code, action, to: route(record.to, `${path}.to`), cooldownMs, afterRetries, onFailure: undefined }
+    return { provider, code, action, to: route(record.to, `${path}.to`), afterRetries, onFailure: undefined }
   }
   if (action === 'ask') {
     if (record.to !== undefined) throw new Error(`${PREFIX}: ${path}.to is only valid for action "switch"`)
-    return { provider, code, action, ask: askSpec(record.ask, `${path}.ask`), cooldownMs, afterRetries, onFailure: undefined }
+    return { provider, code, action, ask: askSpec(record.ask, `${path}.ask`), afterRetries, onFailure: undefined }
   }
   if (record.to !== undefined) throw new Error(`${PREFIX}: ${path}.to is only valid for action "switch"`)
   if (record.ask !== undefined) throw new Error(`${PREFIX}: ${path}.ask is only valid for action "ask"`)
-  return { provider, code, action: action as ChoiceAction, cooldownMs, afterRetries, onFailure: undefined }
-}
-
-/** Read one optional non-negative cooldown; absent means every failure asks. */
-function cooldown(value: unknown, path: string): number {
-  if (value === undefined) return 0
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${PREFIX}: ${path} must be a non-negative integer`)
-  }
-  return value
+  return { provider, code, action: action as ChoiceAction, afterRetries, onFailure: undefined }
 }
 
 /** Read one optional non-negative delegated-failure budget; absent means none. */

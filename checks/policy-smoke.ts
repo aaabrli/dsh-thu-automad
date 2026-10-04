@@ -49,7 +49,9 @@ assert.throws(
   }]),
   /labels must be unique/u,
 )
-assert.throws(() => resolveRules([{ action: 'fail', cooldownMs: -1 }]), /cooldownMs must be a non-negative integer/u)
+// A switch is decided per failure and never remembered, so the field that once
+// carried that memory is gone rather than silently accepted.
+assert.throws(() => resolveRules([{ action: 'fail', cooldownMs: 300_000 }]), /unknown key "cooldownMs"/u)
 assert.throws(() => resolveRules([{ action: 'fail', afterRetries: 1.5 }]), /afterRetries must be a non-negative integer/u)
 
 // The renew action's own contract: a fallback is mandatory, and only the
@@ -172,28 +174,65 @@ assert.throws(() => resolveOptions({ rules: [{ action: 'fail' }], checkIntervalM
   assert.equal(otherStep.delegated, 1, 'the budget is counted per step')
 }
 
-// ── cooldownMs ─────────────────────────────────────────────────────────────
+// ── nothing is remembered between failures ─────────────────────────────────
 
+// An answered switch applies to the step that needed it and is forgotten
+// afterwards: the next failure on the same provider walks the rules again and
+// asks, rather than silently reusing the route the human picked last time.
 {
   const target = { provider: 'deepseek-official', model: 'deepseek-flash' }
-  const h = await boot([
-    { when: { provider: ['tsinghua'], code: ['SERVER'] }, action: 'ask', cooldownMs: 300_000, ask: {
+  const h = await boot([{
+    when: { provider: ['tsinghua'] },
+    action: 'ask',
+    ask: {
       question: 'q',
       choices: [{ label: 'switch away', action: 'switch', to: target }],
       unavailable: { label: 'fail', action: 'fail' },
-    } },
-    { when: { provider: ['tsinghua'], code: ['TRANSPORT'] }, action: 'ask', cooldownMs: 300_000, ask: {
-      question: 'q',
-      choices: [{ label: 'switch away', action: 'switch', to: target }],
-      unavailable: { label: 'fail', action: 'fail' },
-    } },
-  ])
+    },
+  }])
   h.answer = { selected: ['switch away'] }
-  await fire(h, 'agent/request-error', failure('tsinghua', 'SERVER'), () => Promise.resolve(undefined))
+  const first = await fire(h, 'agent/request-error', failure('tsinghua', 'SERVER'), () => Promise.resolve(undefined))
+  assert.deepEqual(first.result, { kind: 'retry' }, 'the answered switch grants this step its attempt')
   assert.equal(h.asked.length, 1, 'the first failure asks')
-  const remembered = await fire(h, 'agent/request-error', failure('tsinghua', 'TRANSPORT', STEP + 1), () => Promise.resolve(undefined))
-  assert.equal(h.asked.length, 1, 'a live switch memory answers the next failure without asking')
-  assert.deepEqual(remembered.result, { kind: 'retry' })
+
+  const second = await fire(h, 'agent/request-error', failure('tsinghua', 'TRANSPORT', STEP + 1), () => Promise.resolve(undefined))
+  assert.equal(h.asked.length, 2, 'the next failure asks again instead of reusing the remembered switch')
+  assert.deepEqual(second.result, { kind: 'retry' }, 'and the fresh answer decides it')
+}
+
+// The reported sequence, end to end with the shipped rule shapes: an unanswered
+// SERVER/TRANSPORT question falls back to its configured switch, and the next
+// PI_AI_ERROR failure still has to ask once its retry budget is spent instead of
+// inheriting that route.
+{
+  const away = { provider: 'deepseek-official', model: 'deepseek-flash' }
+  const h = await boot([
+    {
+      when: { provider: ['tsinghua'], code: ['SERVER', 'TRANSPORT'] },
+      action: 'ask',
+      ask: { question: 'q', choices: [{ label: 'switch', action: 'switch', to: away }], unavailable: { label: 'auto switch', action: 'switch', to: away } },
+    },
+    {
+      when: { provider: ['tsinghua'], code: ['PI_AI_ERROR'] },
+      action: 'ask',
+      afterRetries: 5,
+      ask: { question: 'q', choices: [{ label: 'switch', action: 'switch', to: away }], unavailable: { label: 'give up', action: 'fail' } },
+    },
+  ], { withQuestions: false })
+
+  await fire(h, 'agent/request-error', failure('tsinghua', 'SERVER'), () => Promise.resolve(undefined))
+  const firstStep = await fire(h, 'agent/request', { turn: TURN, step: STEP }, () => Promise.resolve({ provider: 'tsinghua', model: 'x' }))
+  assert.deepEqual(firstStep.result, away, 'an unanswered question falls back to its configured switch')
+
+  const nextStep = STEP + 1
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const delegated = await fire(h, 'agent/request-error', failure('tsinghua', 'PI_AI_ERROR', nextStep), () => Promise.resolve(undefined))
+    assert.equal(delegated.delegated, 1, `attempt ${String(attempt)} stays with the retry owner`)
+  }
+  const past = await fire(h, 'agent/request-error', failure('tsinghua', 'PI_AI_ERROR', nextStep), () => Promise.resolve(undefined))
+  assert.equal(past.result, undefined, 'the failure past the budget gives up rather than reusing the earlier switch')
+  const secondStep = await fire(h, 'agent/request', { turn: TURN, step: nextStep }, () => Promise.resolve({ provider: 'tsinghua', model: 'x' }))
+  assert.deepEqual(secondStep.result, { provider: 'tsinghua', model: 'x' }, 'no model was switched behind the human')
 }
 
 // ── ask, and every way it falls back ───────────────────────────────────────

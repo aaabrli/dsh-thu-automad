@@ -165,13 +165,11 @@ export function apply(ctx: Context, config: unknown): void {
     // that. Zero, the default, acts on the first failure.
     if (rule.afterRetries > 0 && steps.countFailure(key, now) <= rule.afterRetries) return await next()
 
-    // A switch answered once keeps applying for the rule's cooldown, so an
-    // outage spanning many turns does not ask the same question every turn.
-    const cooling = rule.cooldownMs > 0 ? steps.cooldownFor(payload.provider, now) : undefined
+    // Nothing is remembered between failures: every one walks the rules again,
+    // so an outage that spans turns asks each time rather than quietly reusing
+    // the route an earlier answer picked.
     let decision: Decision
-    if (cooling !== undefined) {
-      decision = { resolution: { action: 'switch', to: cooling }, asked: false }
-    } else if (rule.action === 'renew') {
+    if (rule.action === 'renew') {
       // Counted beside the action, not as one: what happened to the request is
       // the resolution below, and this records that the credential was
       // re-acquired on the way there.
@@ -182,10 +180,6 @@ export function apply(ctx: Context, config: unknown): void {
     }
     const { resolution } = decision
     ledger.record(payload.provider, payload.failure.code, resolution, decision.asked, now)
-
-    if (resolution.action === 'switch' && rule.cooldownMs > 0) {
-      steps.rememberSwitch(payload.provider, resolution.to, now + rule.cooldownMs)
-    }
 
     // `fail` short-circuits on purpose: a rule that says "give up" must not be
     // overruled by a later recovery listener that would retry anyway.
