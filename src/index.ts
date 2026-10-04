@@ -45,6 +45,7 @@ import type {
   ActionOutcome, AuthConfigStatus, AuthSettingsRequest, AutomadStatus, SettingsFieldError, SettingsOutcome, TwoFactorAnswer,
 } from './protocol.ts'
 import { Renewer } from './renew.ts'
+import { prefersHtml, renderStatusPage } from './status-page.ts'
 import { TokenWatch } from './watch.ts'
 
 export { resolveOptions } from './config.ts'
@@ -277,7 +278,7 @@ function registerRoutes(
       path: STATUS_PATH,
       methods: ['GET'],
       requestBody: 'buffered',
-      fetch: async () => {
+      fetch: async (request) => {
         await watch.refresh()
         await renewer.refreshFacts()
         const policy = ledger.snapshot(options.rules, true)
@@ -292,7 +293,15 @@ function registerRoutes(
           auth: await authConfigStatus(ctx, options),
           observedAt: Date.now(),
         }
-        return Response.json(status, { headers: { 'cache-control': 'no-store' } })
+        // Two readers share this URL: a browser following the composer pill asks
+        // for HTML, and the browser half's poller asks for JSON. The response
+        // therefore varies on the request's own accept header.
+        if (prefersHtml(request)) {
+          return new Response(renderStatusPage(status), {
+            headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', vary: 'accept' },
+          })
+        }
+        return Response.json(status, { headers: { 'cache-control': 'no-store', vary: 'accept' } })
       },
     }),
     connection.fetch.register({

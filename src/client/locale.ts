@@ -112,7 +112,7 @@ export const en = {
   'twoFactor.error.unreachable': 'The dsh host did not answer.',
 
   'link.label': 'Tsinghua MadModel status',
-  'link.title': 'Open the Tsinghua MadModel status route in a new tab',
+  'link.title': 'Open the Tsinghua MadModel status page in a new tab',
 } as const
 
 /** Simplified Chinese dictionary. */
@@ -214,7 +214,7 @@ export const zh: Record<keyof typeof en, string> = {
   'twoFactor.error.unreachable': 'dsh 宿主没有响应。',
 
   'link.label': '清华 MadModel 状态',
-  'link.title': '在新标签页打开清华 MadModel 状态接口',
+  'link.title': '在新标签页打开清华 MadModel 状态页面',
 }
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {

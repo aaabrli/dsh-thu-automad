@@ -21,7 +21,7 @@ import { SessionStore } from '../src/auth/session.ts'
 import { probeUpstream } from '../src/auth/verify.ts'
 import { RENEW_PATH, SETTINGS_PATH, STATUS_PATH, TWO_FACTOR_PATH } from '../src/protocol.ts'
 import { TwoFactorQueue } from '../src/two-factor.ts'
-import { call, harness, post, settle, token } from './harness.ts'
+import { call, harness, post, route, settle, token } from './harness.ts'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -66,6 +66,63 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   const encoded = JSON.stringify(body)
   assert.ok(!encoded.includes('secret'), 'no stored secret reaches the status document')
   assert.ok(!encoded.includes('eyJ'), 'the token value never reaches the status document either')
+}
+
+// One URL serves two readers. A browser following the composer pill asks for
+// HTML and must get the Chinese table; the browser half's poller asks for JSON
+// and must keep getting the document it validates. Both come from the one
+// registration, so a change to either representation has to keep the other.
+{
+  const h = harness({
+    values: { TSINGHUA_API_KEY: token(Date.now(), Date.now() + 5 * HOUR), MADMODEL_USERNAME: '2023000000', MADMODEL_PASSWORD: 'secret' },
+  })
+  apply(h.ctx, config())
+  await settle()
+
+  const handle = route(h, STATUS_PATH)
+  const navigation = await handle.fetch(new Request(`http://localhost${STATUS_PATH}`, {
+    // The exact accept header a browser sends when opening the URL in a tab.
+    headers: { accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' },
+  }))
+  assert.equal(navigation.status, 200)
+  assert.equal(navigation.headers.get('content-type'), 'text/html; charset=utf-8')
+  assert.equal(navigation.headers.get('vary'), 'accept', 'the representation is declared to vary on accept')
+  const page = await navigation.text()
+  assert.match(page, /^<!doctype html>/u)
+  assert.match(page, /<html lang="zh-CN">/u)
+  for (const label of ['重试', '切换', '失败', '询问次数', '续期', '策略介绍', '次数']) {
+    assert.ok(page.includes(label), `the page words the table in Chinese: ${label}`)
+  }
+  assert.equal(
+    page.match(/<td class="count">0<\/td>/gu)?.length,
+    5,
+    'every ledger counter has its own row, at zero before any failure is acted on',
+  )
+  // A browser navigation is not a poll: the page it renders is current as of
+  // this read and must not be cached by an intermediary.
+  assert.equal(navigation.headers.get('cache-control'), 'no-store')
+
+  const polled = await handle.fetch(new Request(`http://localhost${STATUS_PATH}`, {
+    headers: { accept: 'application/json' },
+  }))
+  assert.match(polled.headers.get('content-type') ?? '', /^application\/json/u)
+  assert.ok(isAutomadStatus(await polled.json()), 'the poller still receives the wire document')
+
+  // A request that states no preference is a script or a plain `curl`; JSON is
+  // the answer it can parse.
+  const bare = await handle.fetch(new Request(`http://localhost${STATUS_PATH}`))
+  assert.match(bare.headers.get('content-type') ?? '', /^application\/json/u)
+
+  // The label and the credential reference are deployment-supplied text, so
+  // neither may reach the page as markup.
+  const escaping = harness({ values: { TSINGHUA_API_KEY: token(Date.now(), Date.now() + 5 * HOUR) } })
+  apply(escaping.ctx, config({ label: '<script>alert(1)</script>' }))
+  await settle()
+  const injected = await (await route(escaping, STATUS_PATH).fetch(new Request(`http://localhost${STATUS_PATH}`, {
+    headers: { accept: 'text/html' },
+  }))).text()
+  assert.ok(!injected.includes('<script>alert(1)</script>'), 'a configured label cannot inject markup')
+  assert.ok(injected.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'it is rendered as text instead')
 }
 
 // A reference the launching environment pins read-only is reported, because the
