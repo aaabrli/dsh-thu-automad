@@ -23,6 +23,12 @@ export const TWO_FACTOR_PATH = '/api/thu-automad/two-factor'
 /** Exact Fetch route triggering one renewal attempt. */
 export const RENEW_PATH = '/api/thu-automad/renew'
 
+/** Exact Fetch route re-probing the network and reporting the transport. */
+export const PROBE_PATH = '/api/thu-automad/probe'
+
+/** Admission-control operations: pause the queue, or reset stuck transport state. */
+export const TRANSPORT_CONTROL_PATH = '/api/thu-automad/transport-control'
+
 /**
  * Document-relative form of a route. A relative reference keeps the route
  * reachable when a deployment mounts the GUI below a subpath.
@@ -33,7 +39,9 @@ export function routeOf(path: string): string {
   return path.slice(1)
 }
 
-/** Document-relative form of {@link STATUS_PATH}, for anchors and fetches. */
+/**
+ * Document-relative form of {@link STATUS_PATH}, for the browser half's fetch.
+ */
 export const STATUS_ROUTE = routeOf(STATUS_PATH)
 
 /**
@@ -158,12 +166,75 @@ export interface AuthConfigStatus {
   tunnel: boolean
   /** Whether the student id currently resolves. */
   usernameConfigured: boolean
+  /** The stored student id, shown back to the settings page; null when unset. */
+  usernameDisplay: string | null
+  /** Layer that supplied the student id (file, environment, …), or null. */
+  usernameSource: string | null
   /** Whether the password currently resolves. */
   passwordConfigured: boolean
   /** Whether the token under `credentialRef` currently resolves. */
   tokenConfigured: boolean
   /** References the launching environment supplies read-only, so a write would be shadowed. */
   shadowedRefs: readonly string[]
+}
+
+/** Configured transport choice: probe the network, or pin one path. */
+export type TransportMode = 'auto' | 'direct' | 'webvpn'
+
+/** Transport actually in use, or `unknown` before the first decision. */
+export type EffectiveTransport = 'direct' | 'webvpn' | 'unknown'
+
+/** What one tunnel keepalive probe concluded. */
+export type TunnelVerdict = 'ok' | 'invalid' | 'network'
+
+/** Admission state for one model, as the status document reports it. */
+export interface TransportPoolStatus {
+  /** Model id the queued requests name. */
+  model: string
+  /** In-flight completions currently allowed. */
+  limit: number
+  /** Gateway ceiling for this model. */
+  ceiling?: number
+  /** Completions currently running upstream. */
+  inFlight: number
+  /** Requests waiting for a slot. */
+  queued: number
+  /** Epoch milliseconds the 429 pause ends, or null when not paused. */
+  pausedUntil: number | null
+}
+
+/**
+ * Where model requests and renewals currently go.
+ *
+ * The direct host is only reachable from the campus network; the WebVPN tunnel
+ * is reachable from anywhere but needs a cookie the renewal replaces. The
+ * browser half shows this so a user can tell which path is live.
+ */
+export interface TransportStatus {
+  /** Whether the loopback `/v1` transport is served at all. */
+  enabled: boolean
+  /** Configured choice. */
+  mode: TransportMode
+  /** Path in use right now. */
+  effective: EffectiveTransport
+  /** Loopback port the provider row points at. */
+  port: number
+  /** Whether the loopback server is accepting connections. */
+  listening: boolean
+  /** Last bind or runtime error, when one happened. */
+  lastError: string | null
+  /** When the current tunnel cookie was acquired, or null. */
+  tunnelCookieAt: number | null
+  /** When the tunnel was last probed, or null. */
+  lastProbeAt: number | null
+  /** What that probe concluded, or null before the first one. */
+  lastProbeVerdict: TunnelVerdict | null
+  /** Per-model admission state, when the loopback transport is running. */
+  pools?: readonly TransportPoolStatus[]
+  /** Whether new requests still wait for a slot; the user can turn this off. */
+  queueEnabled?: boolean
+  /** How many requests may wait in one model's queue. */
+  queueLimit?: number
 }
 
 /** The published status document. */
@@ -178,6 +249,8 @@ export interface AutomadStatus {
   token: TokenStatus
   /** Renewal schedule facts. */
   renew: RenewStatus
+  /** Transport facts, absent in a build that does not serve the proxy. */
+  transport?: TransportStatus
   /** Policy ledger facts. */
   policy: PolicyStatus
   /** Outstanding two-factor challenge, or null. */
@@ -200,6 +273,22 @@ export interface AuthSettingsRequest {
 export interface RenewTriggerRequest {
   /** Why the caller asked; recorded in the renewal status. */
   reason?: string
+}
+
+/** Body accepted by {@link TRANSPORT_CONTROL_PATH}. */
+export interface TransportControlRequest {
+  /** Whether new requests should wait for a slot. */
+  queue?: boolean
+  /** Drop every in-flight slot and queued request, then close live connections. */
+  reset?: boolean
+}
+
+/** Outcome of one transport control request. */
+export interface TransportControlOutcome {
+  /** Whether the request was accepted. */
+  ok: boolean
+  /** Transport facts after the change. */
+  transport: TransportStatus
 }
 
 /** One answer to an outstanding two-factor challenge. */
@@ -236,6 +325,14 @@ export interface ActionOutcome {
   error?: string
 }
 
+/** Outcome of one manual network probe. */
+export interface ProbeOutcome {
+  /** Whether the probe ran; the transport is always present when it did. */
+  ok: boolean
+  /** Transport facts after the probe. */
+  transport: TransportStatus
+}
+
 const TOKEN_STATES: readonly string[] = ['missing', 'unknown', 'ok', 'expiring', 'expired', 'rejected']
 const RENEW_PHASES: readonly string[] = ['off', 'idle', 'scheduled', 'running', 'ok', 'stalled', 'needs-human', 'error']
 
@@ -253,6 +350,7 @@ export function isAutomadStatus(value: unknown): value is AutomadStatus {
     && typeof record.observedAt === 'number'
     && isTokenStatus(record.token)
     && isRenewStatus(record.renew)
+    && (record.transport === undefined || isTransportStatus(record.transport))
     && isPolicyStatus(record.policy)
     && isAuthConfigStatus(record.auth)
     && (record.twoFactor === null || isTwoFactorPrompt(record.twoFactor))
@@ -296,6 +394,40 @@ function isRenewStatus(value: unknown): boolean {
     && isOptionalText(record.lastMessage)
 }
 
+/** Whether a decoded transport status is one this browser half understands. */
+function isTransportStatus(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return typeof record.enabled === 'boolean'
+    && (record.mode === 'auto' || record.mode === 'direct' || record.mode === 'webvpn')
+    && (record.effective === 'direct' || record.effective === 'webvpn' || record.effective === 'unknown')
+    && typeof record.port === 'number' && Number.isFinite(record.port)
+    && typeof record.listening === 'boolean'
+    && isOptionalText(record.lastError)
+    && isOptionalNumber(record.tunnelCookieAt)
+    && isOptionalNumber(record.lastProbeAt)
+    && (record.lastProbeVerdict === null || record.lastProbeVerdict === 'ok'
+      || record.lastProbeVerdict === 'invalid' || record.lastProbeVerdict === 'network')
+    && (record.pools === undefined || isPoolList(record.pools))
+    && (record.queueEnabled === undefined || typeof record.queueEnabled === 'boolean')
+    && (record.queueLimit === undefined || (typeof record.queueLimit === 'number' && Number.isFinite(record.queueLimit)))
+}
+
+/** Whether a decoded pool list matches the transport's admission report. */
+function isPoolList(value: unknown): boolean {
+  if (!Array.isArray(value)) return false
+  return value.every((entry: unknown) => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const pool = entry as Record<string, unknown>
+    return typeof pool.model === 'string'
+      && typeof pool.limit === 'number' && Number.isFinite(pool.limit)
+      && (pool.ceiling === undefined || (typeof pool.ceiling === 'number' && Number.isFinite(pool.ceiling)))
+      && typeof pool.inFlight === 'number' && Number.isFinite(pool.inFlight)
+      && typeof pool.queued === 'number' && Number.isFinite(pool.queued)
+      && isOptionalNumber(pool.pausedUntil)
+  })
+}
+
 /** Whether a decoded value is a policy status this browser half understands. */
 function isPolicyStatus(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false
@@ -315,6 +447,8 @@ function isAuthConfigStatus(value: unknown): boolean {
     && typeof record.deviceName === 'string'
     && typeof record.tunnel === 'boolean'
     && typeof record.usernameConfigured === 'boolean'
+    && (record.usernameDisplay === undefined || isOptionalText(record.usernameDisplay))
+    && (record.usernameSource === undefined || isOptionalText(record.usernameSource))
     && typeof record.passwordConfigured === 'boolean'
     && typeof record.tokenConfigured === 'boolean'
     && Array.isArray(record.shadowedRefs)

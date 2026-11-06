@@ -5,18 +5,12 @@
  * mounted as its own `<style>` element for the plugin's lifetime, keyed by a
  * data attribute so a hot reload cannot stack duplicates.
  *
- * It contains layout and this plugin's own surfaces only. Every interactive
- * control — button, text input, checkbox, dialog — comes from
- * `@deepseek-ai/dsh-client-ui-primitives`, because a feature package cannot
- * import another feature's component and the primitives are the one place a
- * control is shared. Hand-rolling them here is what made an earlier revision's
- * primary button render as a solid block: it named a `--dsw-alias-button-*`
- * token that does not exist.
- *
- * Colors come from the shared `--dsw-*` tokens, which is what keeps every
- * surface correct in both themes.
+ * Plugin surfaces share a palette and spacing scale derived from the shell's
+ * `--dsw-*` tokens. DSH primitives own form controls and modal behavior.
  * @module dsh-thu-automad/client/styles
  */
+
+import iconSvg from '../../icon.svg'
 
 /** Owning plugin id, recorded on the injected `<style>` element. */
 const PLUGIN_ID = 'dsh-thu-automad'
@@ -24,53 +18,113 @@ const PLUGIN_ID = 'dsh-thu-automad'
 /** Class names referenced from the components. */
 export const css = {
   reading: 'taReading',
-  readingWarn: 'taReadingWarn',
-  readingError: 'taReadingError',
-  dot: 'taDot',
-  dotOk: 'taDotOk',
-  dotWarn: 'taDotWarn',
-  dotError: 'taDotError',
-  dotIdle: 'taDotIdle',
+  mark: 'taMark',
+  markTile: 'taMarkTile',
+  pillIcon: 'taPillIcon',
 
   link: 'taLink',
-  linkIcon: 'taLinkIcon',
+  linkWrap: 'taLinkWrap',
+  statusCard: 'taStatusCard',
+  cardHead: 'taCardHead',
+  cardTitle: 'taCardTitle',
+  cardToken: 'taCardToken',
+  cardRows: 'taCardRows',
+  cardRow: 'taCardRow',
+  cardLabel: 'taCardLabel',
+  cardValue: 'taCardValue',
   hidden: 'taHidden',
 
   notice: 'taNotice',
-  noticeError: 'taNoticeError',
   noticeIcon: 'taNoticeIcon',
   noticeBody: 'taNoticeBody',
   noticeTitle: 'taNoticeTitle',
   noticeText: 'taNoticeText',
   noticeClose: 'taNoticeClose',
 
-  form: 'taForm',
-  fieldset: 'taFieldset',
-  legend: 'taLegend',
-  option: 'taOption',
+  settings: 'taSettings',
+  header: 'taHeader',
+  headerBrand: 'taHeaderBrand',
+  headerFeatures: 'taHeaderFeatures',
+  h2: 'taH2',
+  sectionTitle: 'taSectionTitle',
+  group: 'taGroup',
+  row: 'taRow',
+  rowMain: 'taRowMain',
+  rowLabel: 'taRowLabel',
+  rowHint: 'taRowHint',
+  rowValue: 'taRowValue',
+  empty: 'taEmpty',
+  mono: 'taMono',
+  accountRow: 'taAccountRow',
+  identityValue: 'taIdentityValue',
+  identityEditor: 'taIdentityEditor',
+  identityFields: 'taIdentityFields',
+  identityFooter: 'taIdentityFooter',
+  identityHelp: 'taIdentityHelp',
+  meter: 'taMeter',
+  meterFill: 'taMeterFill',
+  meterRow: 'taMeterRow',
+  rowNote: 'taRowNote',
+
+  badge: 'taBadge',
+
+  field: 'taField',
+  fieldHeader: 'taFieldHeader',
+  fieldLabel: 'taFieldLabel',
+  fieldState: 'taFieldState',
+  fieldInput: 'taFieldInput',
+  fieldClear: 'taFieldClear',
   note: 'taNote',
   error: 'taError',
 
-  section: 'taSection',
-  card: 'taCard',
-  h2: 'taH2',
-  h3: 'taH3',
-  p: 'taP',
-  row: 'taRow',
-  rowLabel: 'taRowLabel',
-  rowValue: 'taRowValue',
-  badge: 'taBadge',
-  badgeOk: 'taBadgeOk',
-  badgeIdle: 'taBadgeIdle',
-  badgeWarn: 'taBadgeWarn',
-  badgeError: 'taBadgeError',
-  field: 'taField',
-  fieldLabel: 'taFieldLabel',
-  fieldState: 'taFieldState',
-  actions: 'taActions',
+  factor: 'taFactor',
+  factorModal: 'taFactorModal',
+  factorHead: 'taFactorHead',
+  factorChoices: 'taFactorChoices',
+  factorOption: 'taFactorOption',
+  factorCode: 'taFactorCode',
+  factorActions: 'taFactorActions',
 } as const
 
 const STYLESHEET = `
+.taSettings, .taLinkWrap, .taReading, .taStatusCard, .taNotice, .taFactorModal {
+  --ta-ink: var(--dsw-alias-label-primary, CanvasText);
+  --ta-muted: var(--dsw-alias-label-secondary, var(--ta-ink));
+  --ta-subtle: var(--dsw-alias-label-tertiary, var(--ta-muted));
+  --ta-surface: var(--dsw-alias-bg-layer-1, Canvas);
+  --ta-field: var(--dsw-alias-bg-module-platform, var(--ta-surface));
+  --ta-panel: color-mix(in srgb, var(--ta-field) 52%, var(--ta-surface));
+  --ta-line: color-mix(in srgb, var(--ta-ink) 11%, transparent);
+  --ta-hover: var(--dsw-alias-interactive-bg-hover, var(--ta-panel));
+  --ta-focus: var(--dsw-alias-brand-primary, var(--ta-ink));
+  --ta-ok: var(--dsw-alias-state-success-label, var(--dsw-alias-state-success-primary, #16814a));
+  --ta-warn: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary, #a5630a));
+  --ta-error: var(--dsw-alias-label-error, #b72c39);
+  --ta-radius: 16px;
+  --ta-panel-radius: 12px;
+  --ta-control-radius: 8px;
+  --ta-mark-image: url("data:image/svg+xml,${encodeURIComponent(iconSvg)}");
+}
+
+:is(.taBadge, .taReading, .taMeter, .taNotice)[data-tone="ok"] { --ta-tone: var(--ta-ok); }
+:is(.taBadge, .taReading, .taMeter, .taNotice)[data-tone="warn"] { --ta-tone: var(--ta-warn); }
+:is(.taBadge, .taReading, .taMeter, .taNotice)[data-tone="error"] { --ta-tone: var(--ta-error); }
+
+.taGroup, .taStatusCard, .taNotice, .taFactorModal {
+  box-sizing: border-box;
+  border: 1px solid var(--ta-line);
+  border-radius: var(--ta-radius);
+  background: var(--ta-surface);
+  color: var(--ta-ink);
+}
+.taCardToken, .taIdentityEditor, .taFactor {
+  box-sizing: border-box;
+  border: 1px solid var(--ta-line);
+  border-radius: var(--ta-panel-radius);
+  background: var(--ta-panel);
+}
+:is(.taSettings, .taNotice, .taFactorActions) button { border-radius: var(--ta-control-radius); }
+
 .taReading {
   display: inline-flex;
   align-items: center;
@@ -81,14 +135,31 @@ const STYLESHEET = `
   white-space: nowrap;
 }
 
-.taReadingWarn { color: var(--dsw-alias-state-warn-label); }
-.taReadingError { color: var(--dsw-alias-label-error); }
+.taReading[data-tone="warn"], .taReading[data-tone="error"] {
+  color: color-mix(in srgb, var(--ta-tone) 76%, var(--ta-ink));
+}
 
-.taDot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
-.taDotOk { background: var(--dsw-alias-state-success-primary); }
-.taDotWarn { background: var(--dsw-alias-state-warn-primary); }
-.taDotError { background: var(--dsw-alias-state-error-primary); }
-.taDotIdle { background: var(--dsw-alias-state-idle-primary); }
+.taMark {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  display: block;
+  background: currentColor;
+  mask: var(--ta-mark-image) center / contain no-repeat;
+}
+.taPillIcon { width: 13px; height: 13px; }
+.taMarkTile {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: var(--ta-control-radius);
+  background: var(--ta-field);
+  color: var(--ta-ink);
+}
+
+.taLinkWrap { position: relative; display: inline-flex; align-items: center; max-width: 100%; }
 
 .taLink {
   display: inline-flex;
@@ -97,18 +168,57 @@ const STYLESHEET = `
   box-sizing: border-box;
   max-width: 100%;
   padding: 1px 8px;
-  border-radius: 24px;
+  border: 0;
+  border-radius: var(--ta-control-radius);
   background: transparent;
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--ta-subtle);
+  font: inherit;
   font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px);
   line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
-  text-decoration: none;
+  cursor: pointer;
+  text-align: left;
   white-space: nowrap;
 }
 
-.taLink:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-secondary); }
-.taLink:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
-.taLinkIcon { flex: none; }
+.taLink:hover, .taLink[aria-expanded="true"] { background: var(--ta-hover); color: var(--ta-ink); }
+.taLink:focus-visible { outline: 2px solid var(--ta-focus); outline-offset: 2px; }
+
+.taStatusCard {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: min(324px, calc(100vw - 16px));
+  max-height: min(62dvh, 380px);
+  overflow: auto;
+  padding: 12px;
+  box-shadow: var(--dsw-elevation-prominent, 0 12px 32px rgb(0 0 0 / 25%));
+  font-size: 12px;
+  line-height: 18px;
+  z-index: 1200;
+}
+.taStatusCard:not(:popover-open) { display: none; }
+.taCardHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.taCardTitle { min-width: 0; font-size: 14px; font-weight: 600; }
+.taCardToken { display: grid; gap: 8px; padding: 9px 10px; }
+.taCardToken .taCardRow { padding: 0; }
+.taCardRows { margin-top: 6px; }
+.taCardRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 10px;
+  padding: 6px 0;
+}
+.taCardRows .taCardRow + .taCardRow { border-top: 1px solid var(--ta-line); }
+.taCardRows .taCardRow:last-child { padding-bottom: 0; }
+.taCardLabel { flex: 1 1 70px; color: var(--ta-muted); }
+.taCardValue { display: flex; align-items: center; justify-content: flex-end; gap: 4px 6px; flex-wrap: wrap; margin-inline-start: auto; min-width: 0; max-width: 100%; }
 
 .taHidden {
   position: absolute;
@@ -121,90 +231,177 @@ const STYLESHEET = `
 
 .taNotice {
   position: fixed;
-  top: 12px;
+  pointer-events: auto;
+  top: calc(var(--dsh-frame-top-clearance, 0px) + 12px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 30;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  max-width: min(560px, calc(100vw - 32px));
-  box-sizing: border-box;
+  gap: 8px 10px;
+  width: max-content;
+  max-width: min(536px, calc(100vw - 24px));
   padding: 10px 12px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-2);
-  color: var(--dsw-alias-label-primary);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+  box-shadow: var(--dsw-elevation-prominent, 0 8px 24px rgb(0 0 0 / 18%));
   font-size: 13px;
   line-height: 18px;
 }
 
-.taNoticeIcon { flex: none; margin-top: 1px; color: var(--dsw-alias-state-warn-primary); }
-.taNoticeError .taNoticeIcon { color: var(--dsw-alias-state-error-primary); }
-.taNoticeBody { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.taNoticeTitle { font-weight: 600; }
-.taNoticeText { color: var(--dsw-alias-label-secondary); }
-
-.taNoticeClose {
+.taNoticeIcon {
   flex: none;
-  padding: 0 2px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary);
-  font: inherit;
-  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--ta-control-radius);
+  background: color-mix(in srgb, var(--ta-tone, var(--ta-warn)) 12%, var(--ta-surface));
+  color: color-mix(in srgb, var(--ta-tone, var(--ta-warn)) 76%, var(--ta-ink));
+}
+.taNoticeBody { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; overflow-wrap: anywhere; }
+.taNoticeTitle { font-weight: 600; }
+.taNoticeText { color: var(--ta-muted); font-size: 12px; }
+.taNoticeClose { flex: none; }
+
+/* ── settings page ─────────────────────────────────────────────────────── */
+
+.taSettings {
+  box-sizing: border-box;
+  max-width: 680px;
+  padding: 8px 0 24px;
+  color: var(--ta-ink);
+  font-size: 14px;
+  line-height: 1.6;
 }
 
-.taNoticeClose:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-secondary); }
+.taSettings * { box-sizing: border-box; }
+.taHeader { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 20px; }
+.taHeaderBrand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.taHeader .taMarkTile { width: 36px; height: 36px; border-radius: 10px; }
+.taHeader .taMark { width: 21px; height: 21px; }
+.taH2 { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.4; }
+.taHeaderFeatures { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.taHeaderFeatures li {
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--ta-line);
+  border-radius: var(--ta-control-radius);
+  background: var(--ta-panel);
+  color: var(--ta-muted);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+.taSectionTitle { margin: 22px 0 10px; font-size: 14px; font-weight: 600; color: var(--ta-ink); }
 
-.taForm { display: flex; flex-direction: column; gap: 12px; margin: 0; }
-.taFieldset { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: none; }
-.taLegend { padding: 0; font-weight: 600; color: var(--dsw-alias-label-primary); }
-.taOption { display: flex; align-items: center; gap: 8px; color: var(--dsw-alias-label-primary); }
-.taNote { margin: 0; color: var(--dsw-alias-label-tertiary); }
-.taError { margin: 0; color: var(--dsw-alias-label-error); }
-
-.taSection { display: flex; flex-direction: column; gap: 16px; padding: 4px 0 24px; }
-.taCard {
+.taGroup {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-2);
-  color: var(--dsw-alias-label-primary);
-  font-size: 13px;
-  line-height: 19px;
+  padding: 0 16px;
 }
-.taH2 { margin: 0; font-size: 16px; font-weight: 600; }
-.taH3 { margin: 0; font-size: 13px; font-weight: 600; }
-.taP { margin: 0; color: var(--dsw-alias-label-secondary); }
-.taRow { display: flex; gap: 10px; align-items: baseline; }
-.taRowLabel { flex: none; min-width: 160px; color: var(--dsw-alias-label-secondary); }
-.taRowValue { min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.taRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--ta-line);
+}
+.taRow:last-child { border-bottom: 0; }
+.taRowMain { display: flex; flex-direction: column; min-width: 0; flex: 1 1 108px; overflow-wrap: anywhere; }
+.taRowLabel { font-size: 14px; font-weight: 500; color: var(--ta-ink); }
+.taRowHint { margin-top: 3px; color: var(--ta-subtle); font-size: 12px; line-height: 1.55; }
+.taRowValue {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-width: 0;
+  max-width: 100%;
+  margin-inline-start: auto;
+  font-size: 14px;
+  text-align: right;
+}
 
 .taBadge {
   display: inline-flex;
   align-items: center;
-  padding: 0 8px;
-  border-radius: 999px;
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-secondary);
+  max-width: 100%;
+  padding: 2px 7px;
+  border-radius: var(--ta-control-radius);
+  background: color-mix(in srgb, var(--ta-tone, var(--ta-ink)) 11%, var(--ta-surface));
+  color: color-mix(in srgb, var(--ta-tone, var(--ta-muted)) 72%, var(--ta-ink));
   font-size: 12px;
-  line-height: 20px;
+  line-height: 17px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
-.taBadgeOk { color: var(--dsw-alias-state-success-label); }
-.taBadgeIdle { color: var(--dsw-alias-label-tertiary); }
-.taBadgeWarn { color: var(--dsw-alias-state-warn-label); }
-.taBadgeError { color: var(--dsw-alias-label-error); }
 
-.taField { display: flex; flex-direction: column; gap: 4px; }
-.taFieldLabel { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-.taFieldState { font-weight: 400; color: var(--dsw-alias-label-tertiary); }
-.taActions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.taMeter { height: 4px; width: 100%; border-radius: 2px; background: color-mix(in srgb, var(--ta-ink) 11%, var(--ta-surface)); overflow: hidden; }
+.taMeterFill { height: 100%; border-radius: inherit; background: var(--ta-tone, var(--ta-muted)); transition: width .3s ease; }
+.taMeterRow:has(.taMeter) { padding: 0 0 12px; }
+.taRowNote { margin-top: 3px; color: var(--ta-muted); font-size: 12px; line-height: 1.55; }
+
+@media (prefers-reduced-motion: reduce) {
+  .taMeterFill { transition: none; }
+}
+
+.taEmpty { padding: 18px 0; color: var(--ta-subtle); }
+.taMono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.taAccountRow { border-bottom: 0; }
+.taIdentityValue { margin-top: 2px; color: var(--ta-muted); font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.taNote { margin: 0; color: var(--ta-subtle); font-size: 12px; }
+.taError { margin: 4px 0 0; color: var(--ta-error); font-size: 12px; overflow-wrap: anywhere; }
+
+.taIdentityEditor {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+}
+.taIdentityFields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 10px 14px;
+}
+.taField { display: grid; align-content: start; gap: 4px; min-width: 0; }
+.taFieldHeader { display: flex; align-items: center; justify-content: space-between; gap: 4px 8px; flex-wrap: wrap; min-height: 28px; }
+.taFieldLabel { font-size: 13px; font-weight: 500; }
+.taFieldState { color: var(--ta-subtle); font-size: 12px; font-weight: 400; }
+.taFieldClear { color: var(--ta-muted); }
+.taFieldInput { box-sizing: border-box; width: 100%; min-width: 0; border-radius: var(--ta-control-radius); }
+.taFieldInput input { min-width: 0; }
+.taFieldInput input::placeholder { color: var(--ta-subtle); opacity: 1; }
+.taIdentityFooter { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.taIdentityHelp { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+.taIdentityHelp p + p { margin-top: 4px; }
+.taIdentityFooter > button { margin-inline-start: auto; }
+
+/* ── device verification ───────────────────────────────────────────────── */
+
+.taFactor { display: grid; gap: 12px; padding: 12px; color: var(--ta-ink); }
+.taFactorHead { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 10px; }
+.taFactorChoices { display: grid; min-width: 0; gap: 6px; padding: 0; margin: 0; border: 0; }
+.taFactorOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--ta-line);
+  border-radius: var(--ta-control-radius);
+  background: var(--ta-surface);
+  font-size: 13px;
+  cursor: pointer;
+}
+.taFactorOption input { flex: none; margin: 0; accent-color: var(--ta-focus); }
+.taFactorOption:has(input:checked) { border-color: color-mix(in srgb, var(--ta-ink) 34%, transparent); }
+.taFactorOption:has(input:focus-visible) { outline: 2px solid var(--ta-focus); outline-offset: 2px; }
+.taFactorOption:has(input:disabled) { opacity: .65; cursor: default; }
+.taFactorCode input { font-variant-numeric: tabular-nums; letter-spacing: .14em; }
+.taFactorActions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 `
 
 /**

@@ -17,6 +17,11 @@
         refreshAheadMs: 3600000
         usernameRef: MADMODEL_USERNAME
         passwordRef: MADMODEL_PASSWORD
+        transport:
+          enabled: true
+          mode: auto
+          port: 43110
+          keepaliveMs: 1200000
         tunnel: false
         rules:
           - when: { provider: [ tsinghua ], code: [ AUTH ] }

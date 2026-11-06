@@ -13,7 +13,7 @@
  */
 
 import { memo, useEffect, useState } from 'react'
-import { IconWarningOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   InjectFace, PropsLocale, PropsRuntime, TranslateNS,
 } from '@deepseek-ai/dsh-client-ui-slots'
@@ -22,6 +22,7 @@ import type { AutomadFace } from './face.ts'
 import { NS } from './locale.ts'
 import { css } from './styles.ts'
 import { useCountdown } from './use-countdown.ts'
+import { BrandMark } from './visuals.tsx'
 
 /** Full props of the overlay occupant. */
 export type NoticeProps =
@@ -60,18 +61,19 @@ export const Notice = memo(function Notice({ useAutomadStatus, t }: NoticeProps)
   if (copy === null || key === null || dismissed === key) return null
   return (
     <div
-      className={`${css.notice} ${copy.tone === 'error' ? css.noticeError : ''}`.trim()}
+      className={css.notice}
+      data-tone={copy.tone}
       role="status"
       data-thu-automad-notice
     >
-      <span className={css.noticeIcon} aria-hidden="true"><IconWarningOutlineRegular size={16} /></span>
+      <span className={css.noticeIcon} aria-hidden="true"><BrandMark small /></span>
       <div className={css.noticeBody}>
         <span className={css.noticeTitle}>{copy.title}</span>
         <span className={css.noticeText}>{copy.body}</span>
       </div>
-      <button type="button" className={css.noticeClose} onClick={() => { setDismissed(key) }}>
+      <Button size="sm" className={css.noticeClose} onClick={() => { setDismissed(key) }}>
         {t('notice.dismiss')}
-      </button>
+      </Button>
     </div>
   )
 })
@@ -145,8 +147,8 @@ function expiringCopy(
       return {
         tone: 'error',
         key: `error:${status.renew.lastAttemptAt ?? 0}`,
-        title: t('notice.needsHuman.title', { label }),
-        body: t('notice.needsHuman.body'),
+        title: t('notice.renewFailed.title', { label }),
+        body: t('notice.renewFailed.body'),
       }
     case 'off':
     case 'idle':

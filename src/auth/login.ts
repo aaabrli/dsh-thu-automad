@@ -30,7 +30,7 @@ const MAX_HOPS = 12
 const HOP_TIMEOUT_MS = 20_000
 
 /** Where a ticket was found. */
-export type TicketSource = 'body' | 'redirect' | 'chain'
+export type TicketSource = 'body' | 'redirect' | 'chain' | 'webvpn'
 
 /** What one login attempt produced. */
 export interface LoginOutcome {
@@ -146,6 +146,49 @@ export async function login(request: LoginRequest): Promise<LoginOutcome> {
       model: request.verify.model,
       cookie: outcome.cookie,
       tunnelMode: request.verify.tunnel,
+      tunnelPrefix: auth.MADMODEL_VPN_PREFIX,
+    })
+  }
+  return outcome
+}
+
+/**
+ * Run the off-campus login chain: WebVPN session, info-portal roaming, and
+ * ticket redemption on the tunneled madmodel path.
+ *
+ * The direct chain above only works while the request reaches the gateway from
+ * a campus address. Off campus the school redirects the direct host name into
+ * the unified-auth OAuth form, so both the ticket redemption and later model
+ * requests need the WebVPN tunnel; this function is that path. It returns the
+ * tunnel cookie alongside the token because the tunnel rejects a bare Bearer.
+ * @param request - identity, fingerprint, two-factor answerer, and verify choice.
+ * @returns the token, the tunnel cookie, and where the ticket came from.
+ * @throws Error carrying the vendored chain's stable `code` when a step fails.
+ */
+export async function loginViaWebVpn(request: LoginRequest): Promise<LoginOutcome> {
+  const auth = loadAuth()
+  const started = Date.now()
+  const result = await auth.getMadModelToken({
+    username: request.username,
+    password: request.password,
+    fingerPrint: request.fingerprint,
+    ...request.handler === undefined ? {} : { twoFactorHandler: request.handler },
+  })
+  const outcome: LoginOutcome = {
+    token: result.token,
+    expiresAt: result.expiresAt,
+    cookie: result.cookie,
+    ticketSource: 'webvpn',
+    durationMs: Date.now() - started,
+  }
+  if (request.verify !== undefined) {
+    // The token is only useful with the tunnel that issued it, so the probe
+    // always follows the tunnel even when the caller asked for direct.
+    outcome.probe = await probeUpstream({
+      token: outcome.token,
+      model: request.verify.model,
+      cookie: outcome.cookie,
+      tunnelMode: true,
       tunnelPrefix: auth.MADMODEL_VPN_PREFIX,
     })
   }

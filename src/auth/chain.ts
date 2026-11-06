@@ -118,6 +118,28 @@ export interface IdentityResult {
   anchorBase: string
 }
 
+/** Identity the WebVPN chain signs in with. */
+export interface WebVpnCredentials {
+  /** Student id. */
+  username: string
+  /** Unified-auth password. */
+  password: string
+  /** Device fingerprint; reusing one keeps the school's trusted-device window. */
+  fingerPrint: string
+  /** Two-factor answerer; the chain offers the handshake only when present. */
+  twoFactorHandler?: TwoFactorHandler
+}
+
+/** What the WebVPN chain produces. */
+export interface WebVpnToken {
+  /** The redeemed madmodel JWT. */
+  token: string
+  /** Expiry in epoch milliseconds, from the token's own `exp`. */
+  expiresAt: number
+  /** Tunnel cookie header value the token must be presented with. */
+  cookie: string
+}
+
 /** Client for the direct (non-WebVPN) authentication chain. */
 export interface VendoredAuthClient {
   /**
@@ -168,6 +190,13 @@ export interface VendoredAuth {
    * @returns the classification.
    */
   probeWebvpnSession(url: string, cookie: string): Promise<'ok' | 'invalid' | 'network'>
+  /**
+   * Run the whole WebVPN chain: unified-auth login, WebVPN session, info-portal
+   * roaming, ticket redemption on the tunneled madmodel path.
+   * @param credentials - identity, fingerprint, and two-factor answerer.
+   * @returns the token and the tunnel cookie it must be used with.
+   */
+  getMadModelToken(credentials: WebVpnCredentials): Promise<WebVpnToken>
 }
 
 /** Candidate locations of the vendored entry, relative to this module. */

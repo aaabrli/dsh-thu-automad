@@ -9,17 +9,16 @@
  * attribution, the renewal schedule's offline-decidable outcomes, the durable
  * session record, the two-factor queue, and every route.
  *
- * The one thing this check cannot do is complete a real sign-in: that chain
- * talks to the school, and there is no offline stand-in for it. The renewal
- * paths exercised here are exactly the ones that never reach the network, plus
- * the one where the network refusing is the expected outcome.
+ * Sign-in and gateway responses are simulated; no real school account is used.
  */
 
 import assert from 'node:assert/strict'
 import { apply, isAutomadStatus, resolveOptions } from '../src/index.ts'
+import { loadAuth } from '../src/auth/chain.ts'
 import { SessionStore } from '../src/auth/session.ts'
 import { probeUpstream } from '../src/auth/verify.ts'
 import { RENEW_PATH, SETTINGS_PATH, STATUS_PATH, TWO_FACTOR_PATH } from '../src/protocol.ts'
+import { Renewer } from '../src/renew.ts'
 import { TwoFactorQueue } from '../src/two-factor.ts'
 import { call, harness, post, route, settle, token } from './harness.ts'
 
@@ -33,6 +32,9 @@ const RULES = [{ when: { provider: ['tsinghua'], code: ['AUTH'] }, action: 'rene
 const config = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
   credentialRef: 'TSINGHUA_API_KEY',
   label: 'Tsinghua DeepSeek',
+  // Checks never serve the loopback transport: it binds a real port and the
+  // cases care about the renewal/policy path, not the proxy.
+  transport: { enabled: false },
   rules: RULES,
   ...overrides,
 })
@@ -59,70 +61,13 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   assert.deepEqual((body.policy as { rules: unknown[] }).rules.length, 1)
   assert.equal((body.renew as { enabled: boolean }).enabled, true)
   assert.equal((body.twoFactor as unknown), null)
-  assert.equal(h.routes.length, 4, 'every route is registered once Connection is present')
+  assert.equal(h.routes.length, 6, 'every route is registered once Connection is present')
   assert.ok(h.logs.some(line => line.includes('thu-automad: active')), 'the plugin announces its load')
 
   // The value itself is never published, under any key.
   const encoded = JSON.stringify(body)
   assert.ok(!encoded.includes('secret'), 'no stored secret reaches the status document')
   assert.ok(!encoded.includes('eyJ'), 'the token value never reaches the status document either')
-}
-
-// One URL serves two readers. A browser following the composer pill asks for
-// HTML and must get the Chinese table; the browser half's poller asks for JSON
-// and must keep getting the document it validates. Both come from the one
-// registration, so a change to either representation has to keep the other.
-{
-  const h = harness({
-    values: { TSINGHUA_API_KEY: token(Date.now(), Date.now() + 5 * HOUR), MADMODEL_USERNAME: '2023000000', MADMODEL_PASSWORD: 'secret' },
-  })
-  apply(h.ctx, config())
-  await settle()
-
-  const handle = route(h, STATUS_PATH)
-  const navigation = await handle.fetch(new Request(`http://localhost${STATUS_PATH}`, {
-    // The exact accept header a browser sends when opening the URL in a tab.
-    headers: { accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' },
-  }))
-  assert.equal(navigation.status, 200)
-  assert.equal(navigation.headers.get('content-type'), 'text/html; charset=utf-8')
-  assert.equal(navigation.headers.get('vary'), 'accept', 'the representation is declared to vary on accept')
-  const page = await navigation.text()
-  assert.match(page, /^<!doctype html>/u)
-  assert.match(page, /<html lang="zh-CN">/u)
-  for (const label of ['重试', '切换', '失败', '询问次数', '续期', '策略介绍', '次数']) {
-    assert.ok(page.includes(label), `the page words the table in Chinese: ${label}`)
-  }
-  assert.equal(
-    page.match(/<td class="count">0<\/td>/gu)?.length,
-    5,
-    'every ledger counter has its own row, at zero before any failure is acted on',
-  )
-  // A browser navigation is not a poll: the page it renders is current as of
-  // this read and must not be cached by an intermediary.
-  assert.equal(navigation.headers.get('cache-control'), 'no-store')
-
-  const polled = await handle.fetch(new Request(`http://localhost${STATUS_PATH}`, {
-    headers: { accept: 'application/json' },
-  }))
-  assert.match(polled.headers.get('content-type') ?? '', /^application\/json/u)
-  assert.ok(isAutomadStatus(await polled.json()), 'the poller still receives the wire document')
-
-  // A request that states no preference is a script or a plain `curl`; JSON is
-  // the answer it can parse.
-  const bare = await handle.fetch(new Request(`http://localhost${STATUS_PATH}`))
-  assert.match(bare.headers.get('content-type') ?? '', /^application\/json/u)
-
-  // The label and the credential reference are deployment-supplied text, so
-  // neither may reach the page as markup.
-  const escaping = harness({ values: { TSINGHUA_API_KEY: token(Date.now(), Date.now() + 5 * HOUR) } })
-  apply(escaping.ctx, config({ label: '<script>alert(1)</script>' }))
-  await settle()
-  const injected = await (await route(escaping, STATUS_PATH).fetch(new Request(`http://localhost${STATUS_PATH}`, {
-    headers: { accept: 'text/html' },
-  }))).text()
-  assert.ok(!injected.includes('<script>alert(1)</script>'), 'a configured label cannot inject markup')
-  assert.ok(injected.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'it is rendered as text instead')
 }
 
 // A reference the launching environment pins read-only is reported, because the
@@ -211,7 +156,7 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   const h = harness({ values: { TSINGHUA_API_KEY: 'not-a-jwt' } })
   apply(h.ctx, config({ probeIntervalMs: 60_000, probeUrl: 'https://gateway.test/health' }))
   await settle()
-  assert.equal(h.routes.length, 4)
+  assert.equal(h.routes.length, 6)
 
   const statuses = [401, 200]
   Object.assign(globalThis, {
@@ -313,7 +258,10 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   const store = new SessionStore(h.ctx)
 
   const empty = await store.read()
-  assert.deepEqual(empty, { fingerprint: null, lastRenewAt: null, lastExpiresAt: null, twoFactorAt: null, unattendedRenewals: 0 })
+  assert.deepEqual(empty, {
+    fingerprint: null, lastRenewAt: null, lastExpiresAt: null, twoFactorAt: null, unattendedRenewals: 0,
+    tunnelCookie: null, tunnelCookieAt: null,
+  })
 
   let generated = 0
   const first = await store.ensureFingerprint(() => { generated += 1; return 'a'.repeat(32) })
@@ -453,13 +401,86 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   assert.equal((await probe({ status: 401 })).verdict, 'rejected')
   assert.equal((await probe({ status: 403 })).verdict, 'rejected')
   assert.equal((await probe({ status: 302, headers: { location: '/login' } })).verdict, 'session')
-  const business = await probe({ status: 200 }, JSON.stringify({ data: null, status: 10003, message: '抱歉哦，您无此权限！', success: false }))
+  const business = await probe({ status: 200 }, JSON.stringify({ data: null, status: 10003, message: '鎶辨瓑鍝︼紝鎮ㄦ棤姝ゆ潈闄愶紒', success: false }))
   assert.equal(business.verdict, 'rejected', 'a refusal carried in a 200 body is still a refusal')
   assert.equal(business.code, 10003)
+  const otherBusiness = await probe({ status: 200 }, JSON.stringify({ status: 10004, message: 'private upstream diagnostic', success: false }))
+  assert.equal(otherBusiness.verdict, 'other', 'an unknown business failure does not prove an auth refusal')
+  assert.equal(otherBusiness.detail, 'HTTP 200 · text/plain · code 10004')
+  assert.equal((await probe({ status: 429 }, JSON.stringify({ status: 10003, success: false }))).verdict, 'rate-limited')
+  assert.equal((await probe({ status: 503 }, '<html>unavailable</html>')).verdict, 'unavailable')
   assert.equal((await probe({ status: 200 }, 'not json')).verdict, 'other')
+  const sse = { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8' } }
+  assert.equal((await probe(sse, ': waiting\n\ndata: {"choices":[]}\n\ndata: [DONE]\n\n')).verdict, 'other')
+  assert.equal((await probe(sse, 'data: {"error":{"message":"private upstream diagnostic"}}\n\n')).verdict, 'other')
   Object.assign(globalThis, { fetch: () => Promise.reject(new Error('offline')) })
   const offline = await probeUpstream({ token: 't', model: 'm' })
   assert.equal(offline.verdict, 'network', 'a transport failure is never a claim about the credential')
+}
+
+// A failed post-login probe preserves the token and cookie as a pair. A valid
+// streaming choice allows rotation without waiting for the stream to close.
+{
+  const now = Date.now()
+  const oldToken = token(now - HOUR, now + HOUR)
+  const newToken = token(now, now + 3 * HOUR)
+  const h = harness({ values: { TSINGHUA_API_KEY: oldToken, MADMODEL_USERNAME: 'fixture-id', MADMODEL_PASSWORD: 'fixture-password' } })
+  const session = new SessionStore(h.ctx)
+  const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true, mode: 'webvpn' } })))
+  const auth = loadAuth()
+  const getMadModelToken = auth.getMadModelToken
+  const originalFetch = globalThis.fetch
+  let makeResponse = (): Response => new Response('busy', { status: 429 })
+  try {
+    await session.write({ fingerprint: 'a'.repeat(32), tunnelCookie: 'sid=old', tunnelCookieAt: now - HOUR })
+    await renewer.refreshFacts()
+    auth.getMadModelToken = async () => ({ token: newToken, expiresAt: now + 3 * HOUR, cookie: 'sid=new' })
+    globalThis.fetch = async (url, init) => {
+      assert.equal(url, `${auth.MADMODEL_VPN_PREFIX}/v1/chat/completions`)
+      assert.equal(new Headers(init?.headers).get('Cookie'), 'sid=new', 'the probe uses the candidate session')
+      assert.equal(new Headers(init?.headers).get('Authorization'), `Bearer ${newToken}`)
+      assert.equal(JSON.parse(String(init?.body)).stream, true, 'the probe exercises the same stream as a chat')
+      return makeResponse()
+    }
+
+    const limited = await renewer.ensureFresh('manual')
+    assert.equal(limited.renewed, false)
+    assert.equal(limited.code, 'PROBE_RATE_LIMITED')
+    assert.equal(limited.message, 'HTTP 429 · text/plain')
+    assert.equal(h.values.TSINGHUA_API_KEY, oldToken)
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=old')
+    assert.equal((await session.read()).tunnelCookie, 'sid=old')
+
+    makeResponse = () => { throw new Error('private transport diagnostic') }
+    const unreachable = await renewer.ensureFresh('manual')
+    assert.equal(unreachable.code, 'PROBE_UNREACHABLE')
+    assert.equal(unreachable.message, 'No response from the gateway')
+    assert.equal(h.values.TSINGHUA_API_KEY, oldToken, 'a connection failure cannot validate a candidate')
+
+    const encoder = new TextEncoder()
+    let cancelled = false
+    let closeTimer: ReturnType<typeof setTimeout>
+    makeResponse = () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(': waiting\r\n\r\ndata: {"choices":'))
+        controller.enqueue(encoder.encode('[{"delta":{"content":"x"}}]}\r\n\r\n'))
+        closeTimer = setTimeout(() => { controller.close() }, 1_000)
+      },
+      cancel() { cancelled = true; clearTimeout(closeTimer) },
+    }), { headers: { 'content-type': 'text/event-stream; charset=utf-8' } })
+    const rotated = await renewer.ensureFresh('manual')
+    assert.equal(rotated.renewed, true)
+    assert.ok(cancelled, 'the probe releases the stream after the first valid choice')
+    assert.equal(h.values.TSINGHUA_API_KEY, newToken)
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=new')
+    assert.equal((await session.read()).lastExpiresAt, now + 3 * HOUR)
+    assert.equal((await session.read()).tunnelCookie, 'sid=new')
+  } finally {
+    auth.getMadModelToken = getMadModelToken
+    globalThis.fetch = originalFetch
+    renewer.stop()
+    for (const dispose of h.disposers.reverse()) dispose()
+  }
 }
 
 // ── configuration validation ───────────────────────────────────────────────

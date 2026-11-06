@@ -22,6 +22,8 @@ import { NS } from './locale.ts'
 import type { AutomadStatusSource } from './status.ts'
 import { css } from './styles.ts'
 import { useCountdown } from './use-countdown.ts'
+import { BrandMark } from './visuals.tsx'
+import type { Tone } from './visuals.tsx'
 
 /** Values this plugin injects into the reading. */
 export interface ReadingInjected {
@@ -34,9 +36,6 @@ export type ReadingProps =
   & PropsRuntime<'conversation.composer.statusPillReading'>
   & PropsLocale<typeof NS>
   & InjectFace<ReadingInjected>
-
-/** Visual weight of one reading. */
-type Tone = 'ok' | 'warn' | 'error' | 'idle'
 
 /** Text and weight one status renders as. */
 interface Presentation {
@@ -54,29 +53,61 @@ interface Presentation {
 export const Reading = memo(function Reading({ useAutomadStatus, t }: ReadingProps) {
   const { status, unreachable } = useAutomadStatus(value => value)
   const remaining = useCountdown(status?.token.expiresAt ?? null)
+  const cooldownUntil = nearestCooldown(status)
+  const cooldown = useCountdown(cooldownUntil)
   // Before the first read settles there is nothing truthful to show. The link
   // that renders this seat keeps its own content, so nothing here hides it.
   if (status === null && !unreachable) return null
   const shown: Presentation = status === null
     ? { text: t('pill.unavailable'), tone: 'idle' }
-    : presentationOf(status, remaining, t)
+    : presentationOf(status, remaining, cooldown, t)
   const tone: Tone = unreachable ? 'idle' : shown.tone
   return (
     <span
-      className={`${css.reading} ${toneClass(tone)}`.trim()}
+      className={css.reading}
+      data-tone={tone}
       data-thu-automad-reading
-      title={t('pill.title', { credentialRef: status?.token.credentialRef ?? '' })}
+      title={t('pill.title', { label: status?.token.label ?? '', credentialRef: status?.token.credentialRef ?? '' })}
     >
-      <span className={`${css.dot} ${dotClass(tone)}`.trim()} aria-hidden="true" />
+      <BrandMark small />
       {shown.text}
     </span>
   )
 })
 
+/** Latest 429 cooldown across the model pools, or null when none is paused. */
+function nearestCooldown(status: AutomadStatus | null): number | null {
+  const pools = status?.transport?.pools ?? []
+  let latest: number | null = null
+  for (const pool of pools) {
+    if (pool.pausedUntil === null) continue
+    if (pool.pausedUntil <= Date.now()) continue
+    latest = latest === null || pool.pausedUntil > latest ? pool.pausedUntil : latest
+  }
+  return latest
+}
+
 /** Map one status onto the text and weight the reading renders. */
-function presentationOf(status: AutomadStatus, remaining: string | null, t: TranslateNS<typeof NS>): Presentation {
-  const { token, renew } = status
+function presentationOf(
+  status: AutomadStatus,
+  remaining: string | null,
+  cooldown: string | null,
+  t: TranslateNS<typeof NS>,
+): Presentation {
+  const { token, renew, transport } = status
   const label = token.label
+  const pools = transport?.pools ?? []
+  const paused = pools.some(pool => pool.pausedUntil !== null && pool.pausedUntil > Date.now())
+  if (paused) {
+    return {
+      text: t('pill.cooldown', { label, remaining: cooldown ?? '' }),
+      tone: 'warn',
+    }
+  }
+  const queued = pools.reduce((sum, pool) => sum + pool.queued, 0)
+  if (queued > 0) {
+    return { text: t('pill.queued', { label, count: String(queued) }), tone: 'warn' }
+  }
   const withRemaining = { label, remaining: remaining ?? '' }
   if (renew.phase === 'running' && (token.state === 'ok' || token.state === 'expiring')) {
     return { text: t('pill.renewing', { label }), tone: 'warn' }
@@ -94,26 +125,5 @@ function presentationOf(status: AutomadStatus, remaining: string | null, t: Tran
       return { text: t('pill.missing', { label }), tone: 'idle' }
     case 'unknown':
       return { text: t('pill.unknown', { label }), tone: 'idle' }
-  }
-}
-
-/** Text-color class for one tone. */
-function toneClass(tone: Tone): string {
-  switch (tone) {
-    case 'warn': return css.readingWarn
-    case 'error': return css.readingError
-    case 'ok':
-    case 'idle':
-      return ''
-  }
-}
-
-/** Indicator-dot class for one tone. */
-function dotClass(tone: Tone): string {
-  switch (tone) {
-    case 'ok': return css.dotOk
-    case 'warn': return css.dotWarn
-    case 'error': return css.dotError
-    case 'idle': return css.dotIdle
   }
 }

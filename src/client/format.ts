@@ -31,3 +31,13 @@ export function formatRemaining(expiresAt: number | null, now: number): string |
   if (remaining >= MINUTE_MS) return `${String(Math.floor(remaining / MINUTE_MS))}m`
   return `${String(Math.floor(remaining / 1000))}s`
 }
+
+/** Reader-local time for a scheduled or completed action. */
+export function formatTime(at: number | null): string {
+  return at === null ? '—' : new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' }).format(at)
+}
+
+/** Reader-local date and time for a token deadline. */
+export function formatDateTime(at: number): string {
+  return new Intl.DateTimeFormat(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(at)
+}

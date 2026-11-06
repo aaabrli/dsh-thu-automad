@@ -44,6 +44,10 @@ export interface SessionFacts {
   twoFactorAt: number | null
   /** Successful renewals completed without a two-factor answer since that challenge. */
   unattendedRenewals: number
+  /** WebVPN tunnel cookie header value the token must be presented with, or null. */
+  tunnelCookie: string | null
+  /** Epoch milliseconds when that tunnel cookie was acquired, or null. */
+  tunnelCookieAt: number | null
 }
 
 /** Facts of a session nothing has recorded yet. */
@@ -53,6 +57,8 @@ const EMPTY: SessionFacts = {
   lastExpiresAt: null,
   twoFactorAt: null,
   unattendedRenewals: 0,
+  tunnelCookie: null,
+  tunnelCookieAt: null,
 }
 
 /** Read and write this plugin's session record. */
@@ -135,6 +141,10 @@ function readFacts(record: CredentialRecord | undefined): SessionFacts {
       && Number.isSafeInteger(raw.unattendedRenewals) && raw.unattendedRenewals >= 0
       ? raw.unattendedRenewals
       : 0,
+    tunnelCookie: typeof raw.tunnelCookie === 'string' && raw.tunnelCookie.length > 0
+      ? raw.tunnelCookie
+      : null,
+    tunnelCookieAt: milliseconds(raw.tunnelCookieAt),
   }
 }
 

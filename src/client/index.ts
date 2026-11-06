@@ -28,9 +28,11 @@ import { TwoFactorDialog } from './TwoFactorDialog.tsx'
 import { createActions } from './actions.ts'
 import type { AutomadFace } from './face.ts'
 import { NS, en, zh } from './locale.ts'
+import { installSettingsIcon } from './settings-icon.ts'
 import { STATUS_PILL_READING } from './slots.ts'
 import { AutomadStatusController } from './status.ts'
 import { installStyles } from './styles.ts'
+import iconSvg from '../../icon.svg'
 
 /** Cordis plugin name; the Host half uses the same string. */
 export const name = 'thu-automad'
@@ -51,6 +53,15 @@ export function apply(ctx: Context): void {
 
   ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'thu-automad: dictionaries')
   ctx.effect(() => installStyles(), 'thu-automad: stylesheet')
+  // The Settings sidebar is shell-owned; this replaces its generic gear in this
+  // plugin's row with the plugin glyph. Guarded because the check harness has
+  // no DOM while the bundle still has to load there.
+  if (typeof MutationObserver !== 'undefined') {
+    ctx.effect(
+      () => installSettingsIcon([zh['settings.nav'], en['settings.nav']], iconSvg),
+      'thu-automad: settings glyph',
+    )
+  }
   ctx.effect(() => controller.start(), 'thu-automad: status polling')
 
   // Bound after the dictionaries are registered; the thunk below is re-read on
@@ -72,6 +83,7 @@ export function apply(ctx: Context): void {
     order: 11,
     locale: NS,
     children: { [STATUS_PILL_READING]: { kind: 'single', scope: 'session' } },
+    inject: () => ({ hooks: { automadStatus: controller } }),
   }, StatusLink))
 
   // Order 9 keeps the dialog under the notice in the overlay's own order; its

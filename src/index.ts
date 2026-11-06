@@ -34,30 +34,32 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import type { GenerateOptions, LlmCallConfig, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-user-questions'
-import { DEVICE_NAME } from './auth/chain.ts'
+import { DEVICE_NAME, loadAuth } from './auth/chain.ts'
 import { resolveOptions } from './config.ts'
 import type { AutomadOptions } from './config.ts'
 import { matchRule, resolutionOf, stepKey, substitute, StepRoutes } from './policy/policy.ts'
 import type { AskSpec, Choice, Resolution, Route, Rule } from './policy/config.ts'
 import { StatusLedger } from './policy/status.ts'
-import { RENEW_PATH, SETTINGS_PATH, STATUS_PATH, TWO_FACTOR_PATH } from './protocol.ts'
+import { PROBE_PATH, RENEW_PATH, SETTINGS_PATH, STATUS_PATH, TRANSPORT_CONTROL_PATH, TWO_FACTOR_PATH } from './protocol.ts'
 import type {
-  ActionOutcome, AuthConfigStatus, AuthSettingsRequest, AutomadStatus, SettingsFieldError, SettingsOutcome, TwoFactorAnswer,
+  ActionOutcome, AuthConfigStatus, AuthSettingsRequest, AutomadStatus, ProbeOutcome, SettingsFieldError,
+  SettingsOutcome, TransportStatus, TwoFactorAnswer,
 } from './protocol.ts'
 import { Renewer } from './renew.ts'
-import { prefersHtml, renderStatusPage } from './status-page.ts'
 import { TokenWatch } from './watch.ts'
+import { startTransportProxy } from './transport/proxy.ts'
+import type { RunningProxy } from './transport/proxy.ts'
 
 export { resolveOptions } from './config.ts'
 export { readTokenTimes } from './jwt.ts'
 export { isAuthRefusal } from './watch.ts'
 export { resolveRules } from './policy/config.ts'
 export { matchRule, stepKey } from './policy/policy.ts'
-export { SETTINGS_PATH, STATUS_PATH, TWO_FACTOR_PATH, RENEW_PATH, isAutomadStatus, isTokenStatus, routeOf } from './protocol.ts'
+export { SETTINGS_PATH, STATUS_PATH, TWO_FACTOR_PATH, RENEW_PATH, PROBE_PATH, TRANSPORT_CONTROL_PATH, isAutomadStatus, isTokenStatus, routeOf } from './protocol.ts'
 export type { AuthOptions, AutomadOptions, ProbeOptions, RenewOptions, TokenWatchOptions } from './config.ts'
 export type { AskSpec, Choice, ChoiceAction, Resolution, Route, Rule, RuleAction } from './policy/config.ts'
 export type { DecisionCounts, LastDecision, RuleSummary, StatusSnapshot } from './policy/status.ts'
-export type { AutomadStatus, AuthConfigStatus, RenewPhase, RenewStatus, TokenState, TokenStatus, TwoFactorAnswer, TwoFactorPrompt } from './protocol.ts'
+export type { AutomadStatus, AuthConfigStatus, ProbeOutcome, RenewPhase, RenewStatus, TokenState, TokenStatus, TwoFactorAnswer, TwoFactorPrompt } from './protocol.ts'
 export type { TokenTimes } from './jwt.ts'
 export type { SessionFacts } from './auth/session.ts'
 export type { LoginOutcome, TicketSource } from './auth/login.ts'
@@ -107,6 +109,77 @@ export function apply(ctx: Context, config: unknown): void {
   const steps = new StepRoutes()
   const ledger = new StatusLedger()
   const providers = new Set(options.providers)
+  // The loopback server is created inside an effect but the status route needs
+  // to read its live queue; one mutable holder keeps both in sync.
+  const runtime: { proxy: RunningProxy | undefined } = { proxy: undefined }
+
+  // The loopback transport is what makes the provider row work on either
+  // network: the row points at this server, and the server picks the upstream
+  // (direct on campus, WebVPN tunnel off campus) per request.
+  if (options.transport.enabled) {
+    ctx.effect(() => {
+      let running: RunningProxy | undefined
+      let disposed = false
+      void startTransportProxy({
+        port: options.transport.port,
+        concurrency: options.transport.concurrency,
+        resolveAuth: async () => {
+          const mode = await renewer.detectTransport()
+          const resolved = await ctx.credentials.resolve(options.credentialRef)
+          const token = resolved?.value.trim() ?? ''
+          if (token === '') return null
+          const snapshot = renewer.transportSnapshot()
+          return {
+            token,
+            mode: mode === 'webvpn' ? 'webvpn' : 'direct',
+            cookie: mode === 'webvpn' ? snapshot.cookie : '',
+            tunnelPrefix: loadAuth().MADMODEL_VPN_PREFIX,
+          }
+        },
+        refresh: async () => {
+          renewer.clearBackoff()
+          await renewer.ensureFresh('manual')
+          const snapshot = renewer.transportSnapshot()
+          return snapshot.effective === 'direct' || snapshot.cookie !== ''
+        },
+        log: (message: string) => { ctx.logger.info(`thu-automad: ${message}`) },
+      }).then((proxy) => {
+        if (disposed) {
+          void proxy.close()
+          return
+        }
+        running = proxy
+        runtime.proxy = proxy
+        const state = proxy.status()
+        renewer.noteProxy({ listening: state.listening, lastError: state.lastError, pools: state.pools })
+        ctx.logger.info(
+          `thu-automad: local transport at http://127.0.0.1:${String(options.transport.port)}/v1 `
+          + `(mode ${options.transport.mode})`,
+        )
+      }).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        renewer.noteProxy({ listening: false, lastError: message })
+        ctx.logger.info(
+          `thu-automad: local transport failed to start on 127.0.0.1:${String(options.transport.port)}: ${message}`,
+        )
+      })
+      return () => {
+        disposed = true
+        runtime.proxy = undefined
+        void running?.close()
+      }
+    }, 'thu-automad: local transport')
+  }
+
+  // The WebVPN tunnel drops an idle session sooner than the token expires, so
+  // without a keepalive a request would meet a login page while the renewal
+  // clock still says "valid".
+  if (options.transport.enabled) {
+    ctx.effect(() => {
+      const timer = setInterval(() => { void renewer.keepalive() }, options.transport.keepaliveMs)
+      return () => { clearInterval(timer) }
+    }, 'thu-automad: tunnel keepalive')
+  }
 
   ctx.effect(() => {
     // Read once at load so a token that is already due renews before the first
@@ -138,10 +211,12 @@ export function apply(ctx: Context, config: unknown): void {
   // the schedule, and the policy; it only loses the browser reach.
   ctx.inject(['connection'], (routeCtx) => {
     routeCtx.effect(
-      () => registerRoutes(routeCtx, options, watch, renewer, ledger),
+      () => registerRoutes(routeCtx, options, watch, renewer, ledger, runtime),
       'thu-automad: routes',
     )
-    routeCtx.logger.info(`thu-automad: routes at ${STATUS_PATH}, ${SETTINGS_PATH}, ${TWO_FACTOR_PATH}, ${RENEW_PATH}`)
+    routeCtx.logger.info(
+      `thu-automad: routes at ${STATUS_PATH}, ${SETTINGS_PATH}, ${TWO_FACTOR_PATH}, ${RENEW_PATH}, ${PROBE_PATH}`,
+    )
   })
 
   // Every model request to a watched provider is evidence about the token: a
@@ -271,6 +346,7 @@ function registerRoutes(
   watch: TokenWatch,
   renewer: Renewer,
   ledger: StatusLedger,
+  runtime: { proxy: RunningProxy | undefined },
 ): () => void {
   const connection = ctx.connection
   const disposers = [
@@ -288,20 +364,14 @@ function registerRoutes(
           uptimeSeconds: policy.uptimeSeconds,
           token: watch.snapshot(),
           renew: renewer.snapshot(),
+          transport: transportStatusOf(renewer, runtime, options),
           policy: { rules: policy.rules, counts: policy.decisions, last: policy.last },
           twoFactor: renewer.twoFactor.snapshot(),
           auth: await authConfigStatus(ctx, options),
           observedAt: Date.now(),
         }
-        // Two readers share this URL: a browser following the composer pill asks
-        // for HTML, and the browser half's poller asks for JSON. The response
-        // therefore varies on the request's own accept header.
-        if (prefersHtml(request)) {
-          return new Response(renderStatusPage(status), {
-            headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', vary: 'accept' },
-          })
-        }
-        return Response.json(status, { headers: { 'cache-control': 'no-store', vary: 'accept' } })
+        // The route serves one representation: the JSON the browser half validates.
+        return Response.json(status, { headers: { 'cache-control': 'no-store' } })
       },
     }),
     connection.fetch.register({
@@ -342,9 +412,62 @@ function registerRoutes(
         return json({ ok: true, renewed: outcome.renewed, code: outcome.code, message: outcome.message })
       },
     }),
+    connection.fetch.register({
+      path: PROBE_PATH,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async () => {
+        // One forced reachability probe: this is the settings page's
+        // "detect again" button, so it must not start a school sign-in.
+        await renewer.detectTransport(true)
+        const outcome: ProbeOutcome = { ok: true, transport: transportStatusOf(renewer, runtime, options) }
+        return json({ ...outcome })
+      },
+    }),
+    connection.fetch.register({
+      path: TRANSPORT_CONTROL_PATH,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        const body = await readJson(request)
+        const record = typeof body === 'object' && body !== null ? body as Record<string, unknown> : {}
+        const queue = typeof record.queue === 'boolean' ? record.queue : null
+        const reset = record.reset === true
+        if (queue === null && !reset) return json({ ok: false, error: 'expected { queue: boolean } or { reset: true }' }, 400)
+        const proxy = runtime.proxy
+        if (proxy === undefined) return json({ ok: false, error: 'the loopback transport is not running' }, 503)
+        if (queue !== null) proxy.setQueueEnabled(queue)
+        if (reset) proxy.reset()
+        const outcome = { ok: true, transport: transportStatusOf(renewer, runtime, options) }
+        return json(outcome)
+      },
+    }),
   ]
   return () => {
     for (const dispose of disposers) void dispose()
+  }
+}
+
+/** Project the transport owner's facts onto the wire status. */
+function transportStatusOf(
+  renewer: Renewer,
+  runtime: { proxy: RunningProxy | undefined },
+  options: AutomadOptions,
+): TransportStatus {
+  const transport = renewer.transportSnapshot()
+  return {
+    enabled: transport.enabled,
+    mode: transport.mode,
+    effective: transport.effective,
+    port: transport.port,
+    listening: transport.listening,
+    lastError: transport.lastError,
+    tunnelCookieAt: transport.cookieAt,
+    lastProbeAt: transport.probeAt,
+    lastProbeVerdict: transport.probeVerdict,
+    pools: runtime.proxy?.status().pools ?? transport.pools,
+    queueEnabled: runtime.proxy?.status().queueEnabled,
+    queueLimit: options.transport.concurrency.queueLimit,
   }
 }
 
@@ -452,6 +575,10 @@ async function authConfigStatus(ctx: Context, options: AutomadOptions): Promise<
   }))
   const of = (ref: CredentialRef): { configured: boolean; writable: boolean } =>
     described.find(entry => entry.ref === ref) ?? { configured: false, writable: true }
+  // The student id is not a secret the way the password is: the settings page
+  // shows it back so the user can confirm which account renewal will use. The
+  // password never leaves the credentials seam in a readable form.
+  const username = await ctx.credentials.resolve(options.auth.usernameRef)
   return {
     credentialRef: options.credentialRef,
     usernameRef: options.auth.usernameRef,
@@ -459,6 +586,8 @@ async function authConfigStatus(ctx: Context, options: AutomadOptions): Promise<
     deviceName: DEVICE_NAME,
     tunnel: options.auth.tunnel,
     usernameConfigured: of(options.auth.usernameRef).configured,
+    usernameDisplay: username?.value ?? null,
+    usernameSource: username?.source ?? null,
     passwordConfigured: of(options.auth.passwordRef).configured,
     tokenConfigured: of(options.credentialRef).configured,
     shadowedRefs: described.filter(entry => !entry.writable).map(entry => entry.ref),

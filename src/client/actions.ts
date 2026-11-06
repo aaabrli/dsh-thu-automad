@@ -10,10 +10,11 @@
  */
 
 import {
-  RENEW_PATH, SETTINGS_PATH, TWO_FACTOR_PATH, routeOf,
+  PROBE_PATH, RENEW_PATH, SETTINGS_PATH, TRANSPORT_CONTROL_PATH, TWO_FACTOR_PATH, routeOf,
 } from '../protocol.ts'
 import type {
-  ActionOutcome, AuthSettingsRequest, SettingsOutcome, TwoFactorAnswer,
+  ActionOutcome, AuthSettingsRequest, ProbeOutcome, SettingsOutcome, TransportControlOutcome,
+  TransportControlRequest, TwoFactorAnswer,
 } from '../protocol.ts'
 
 /** Outcome of one manual renewal trigger. */
@@ -45,6 +46,17 @@ export interface AutomadActions {
    * @returns the attempt outcome, or null when the route was unreachable.
    */
   renewNow(): Promise<RenewTriggerOutcome | null>
+  /**
+   * Re-probe the network and return the transport facts.
+   * @returns the probe outcome, or null when the route was unreachable.
+   */
+  probeTransport(): Promise<ProbeOutcome | null>
+  /**
+   * Turn admission control off, or reset a queue that is stuck.
+   * @param request - `queue` toggles waiting, `reset` clears every slot.
+   * @returns the transport facts after the change, or null when unreachable.
+   */
+  controlTransport(request: TransportControlRequest): Promise<TransportControlOutcome | null>
 }
 
 /**
@@ -59,6 +71,10 @@ export function createActions(): AutomadActions {
       await post<ActionOutcome>(TWO_FACTOR_PATH, answer),
     renewNow: async () =>
       await post<RenewTriggerOutcome>(RENEW_PATH, {}),
+    probeTransport: async () =>
+      await post<ProbeOutcome>(PROBE_PATH, {}),
+    controlTransport: async request =>
+      await post<TransportControlOutcome>(TRANSPORT_CONTROL_PATH, request),
   }
 }
 

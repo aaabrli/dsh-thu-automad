@@ -18,6 +18,8 @@
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Rule } from './policy/config.ts'
 import { resolveRules } from './policy/config.ts'
+import type { ConcurrencyOptions } from './transport/concurrency.ts'
+import { CONCURRENCY_DEFAULTS } from './transport/concurrency.ts'
 
 /** Periodic verification of a credential the provider can reject early. */
 export interface ProbeOptions {
@@ -67,12 +69,28 @@ export interface RenewOptions {
   verifyModel: string
 }
 
+/** How model requests and renewals reach the gateway. */
+export interface TransportOptions {
+  /** Whether this plugin serves the loopback `/v1` transport at all. */
+  enabled: boolean
+  /** Transport choice; `auto` probes the direct host and picks one. */
+  mode: 'auto' | 'direct' | 'webvpn'
+  /** Loopback port the provider row's `baseURL` points at. */
+  port: number
+  /** Interval between WebVPN keepalive probes, in milliseconds. */
+  keepaliveMs: number
+  /** Per-model admission control for the gateway's concurrency limit. */
+  concurrency: ConcurrencyOptions
+}
+
 /** Validated options the Host half runs on. */
 export interface AutomadOptions extends TokenWatchOptions {
   /** Student identity and transport choice for a renewal. */
   auth: AuthOptions
   /** Renewal schedule and interaction budget. */
   renew: RenewOptions
+  /** Loopback transport the provider row talks to. */
+  transport: TransportOptions
   /** Ordered failure rules the policy half runs on. */
   rules: readonly Rule[]
 }
@@ -96,6 +114,14 @@ const DEFAULTS = {
   verifyModel: 'DeepSeek-V4.1-Flash',
 } as const satisfies Record<string, unknown>
 
+/** Documented defaults for the nested transport mapping. */
+const TRANSPORT_DEFAULTS = {
+  enabled: true,
+  mode: 'auto',
+  port: 43_110,
+  keepaliveMs: 20 * 60 * 1000,
+} as const
+
 /** Grammar the credentials seam itself accepts for a reference. */
 const REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u
 
@@ -114,7 +140,7 @@ const MIN_CHECK_INTERVAL_MS = 10 * 1000
 export function resolveOptions(config: unknown): AutomadOptions {
   const record = asRecord(config)
   for (const key of Object.keys(record)) {
-    if (key !== 'rules' && !(key in DEFAULTS)) {
+    if (key !== 'rules' && key !== 'transport' && !(key in DEFAULTS)) {
       throw new Error(`thu-automad: unknown config key "${key}"`)
     }
   }
@@ -147,6 +173,8 @@ export function resolveOptions(config: unknown): AutomadOptions {
     passwordRef: ref(record, 'passwordRef', DEFAULTS.passwordRef),
     tunnel: boolean(record, 'tunnel', DEFAULTS.tunnel),
   }
+
+  const transport = resolveTransport(record)
 
   const refreshAheadMs = count(record, 'refreshAheadMs', DEFAULTS.refreshAheadMs)
   const checkIntervalMs = count(record, 'checkIntervalMs', DEFAULTS.checkIntervalMs)
@@ -194,8 +222,110 @@ export function resolveOptions(config: unknown): AutomadOptions {
       verifyAfterRenew: boolean(record, 'verifyAfterRenew', DEFAULTS.verifyAfterRenew),
       verifyModel,
     },
+    transport,
     rules,
   }
+}
+
+/** Read and validate the nested `transport` mapping. */
+function resolveTransport(record: Record<string, unknown>): TransportOptions {
+  const raw = record.transport
+  if (raw !== undefined && (typeof raw !== 'object' || raw === null || Array.isArray(raw))) {
+    throw new Error('thu-automad: transport must be a mapping')
+  }
+  const value = (raw ?? {}) as Record<string, unknown>
+  for (const key of Object.keys(value)) {
+    if (!['enabled', 'mode', 'port', 'keepaliveMs', 'concurrency'].includes(key)) {
+      throw new Error(`thu-automad: unknown transport key "${key}"`)
+    }
+  }
+  const mode = text(value, 'mode', TRANSPORT_DEFAULTS.mode)
+  if (mode !== 'auto' && mode !== 'direct' && mode !== 'webvpn') {
+    throw new Error('thu-automad: transport.mode must be one of auto, direct, webvpn')
+  }
+  const port = count(value, 'port', TRANSPORT_DEFAULTS.port)
+  if (port < 1024 || port > 65_535) {
+    throw new Error('thu-automad: transport.port must be an unused local port between 1024 and 65535')
+  }
+  const keepaliveMs = count(value, 'keepaliveMs', TRANSPORT_DEFAULTS.keepaliveMs)
+  if (keepaliveMs < 5 * 60 * 1000) {
+    throw new Error('thu-automad: transport.keepaliveMs must be at least 300000')
+  }
+  return {
+    enabled: boolean(value, 'enabled', TRANSPORT_DEFAULTS.enabled),
+    mode,
+    port,
+    keepaliveMs,
+    concurrency: resolveConcurrency(value.concurrency),
+  }
+}
+
+/** Read and validate the nested `transport.concurrency` mapping. */
+function resolveConcurrency(raw: unknown): ConcurrencyOptions {
+  if (raw !== undefined && (typeof raw !== 'object' || raw === null || Array.isArray(raw))) {
+    throw new Error('thu-automad: transport.concurrency must be a mapping')
+  }
+  const value = (raw ?? {}) as Record<string, unknown>
+  const known = new Set(Object.keys(CONCURRENCY_DEFAULTS))
+  for (const key of Object.keys(value)) {
+    if (!known.has(key)) throw new Error(`thu-automad: unknown transport.concurrency key "${key}"`)
+  }
+  const options: ConcurrencyOptions = {
+    initial: count(value, 'initial', CONCURRENCY_DEFAULTS.initial),
+    max: count(value, 'max', CONCURRENCY_DEFAULTS.max),
+    min: count(value, 'min', CONCURRENCY_DEFAULTS.min),
+    growAfter: count(value, 'growAfter', CONCURRENCY_DEFAULTS.growAfter),
+    queueLimit: count(value, 'queueLimit', CONCURRENCY_DEFAULTS.queueLimit),
+    maxWaitMs: count(value, 'maxWaitMs', CONCURRENCY_DEFAULTS.maxWaitMs),
+    heartbeatAfterMs: count(value, 'heartbeatAfterMs', CONCURRENCY_DEFAULTS.heartbeatAfterMs),
+    heartbeatMs: count(value, 'heartbeatMs', CONCURRENCY_DEFAULTS.heartbeatMs),
+    cooldownMs: count(value, 'cooldownMs', CONCURRENCY_DEFAULTS.cooldownMs),
+    maxCooldownMs: count(value, 'maxCooldownMs', CONCURRENCY_DEFAULTS.maxCooldownMs),
+    perModel: resolvePerModel(value.perModel),
+  }
+  if (options.initial < 1) throw new Error('thu-automad: transport.concurrency.initial must be at least 1')
+  if (options.min < 1 || options.min > options.initial) {
+    throw new Error('thu-automad: transport.concurrency.min must be between 1 and initial')
+  }
+  if (options.max < options.initial) {
+    throw new Error('thu-automad: transport.concurrency.max must be at least initial')
+  }
+  if (options.growAfter < 1) throw new Error('thu-automad: transport.concurrency.growAfter must be at least 1')
+  if (options.queueLimit < 1) throw new Error('thu-automad: transport.concurrency.queueLimit must be at least 1')
+  if (options.heartbeatAfterMs < 1_000) {
+    throw new Error('thu-automad: transport.concurrency.heartbeatAfterMs must be at least 1000')
+  }
+  if (options.heartbeatMs < 1_000) {
+    throw new Error('thu-automad: transport.concurrency.heartbeatMs must be at least 1000')
+  }
+  if (options.cooldownMs < 1_000) {
+    throw new Error('thu-automad: transport.concurrency.cooldownMs must be at least 1000')
+  }
+  if (options.maxCooldownMs < options.cooldownMs) {
+    throw new Error('thu-automad: transport.concurrency.maxCooldownMs must be at least cooldownMs')
+  }
+  for (const [model, limit] of Object.entries(options.perModel ?? {})) {
+    if (limit < options.min) {
+      throw new Error(`thu-automad: transport.concurrency.perModel["${model}"] must be at least min`)
+    }
+  }
+  return options
+}
+
+/** Read the optional per-model ceiling map. */
+function resolvePerModel(raw: unknown): Record<string, number> {
+  if (raw === undefined) return {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('thu-automad: transport.concurrency.perModel must be a mapping')
+  }
+  const result: Record<string, number> = {}
+  for (const [model, limit] of Object.entries(raw)) {
+    if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
+      throw new Error(`thu-automad: transport.concurrency.perModel["${model}"] must be a positive integer`)
+    }
+    result[model] = limit
+  }
+  return result
 }
 
 /** Read the raw config as a mapping, accepting an omitted or empty one. */

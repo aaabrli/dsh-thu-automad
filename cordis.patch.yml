@@ -30,8 +30,33 @@
         # Both are filled in from 设置 → 清华 MadModel.
         usernameRef: MADMODEL_USERNAME
         passwordRef: MADMODEL_PASSWORD
-        # Set true when the upstream check has to go through the school's
-        # WebVPN tunnel.
+        # 本地传输层：provider 行指向它，插件按网络选择直连或 WebVPN 隧道。
+        # keepaliveMs 让隧道会话在 token 到期前一直活着（隧道空闲约 2 小时失效）。
+        # concurrency 是网关并发上限的准入控制：超出的请求在本地等待，
+        # 429 时暂停该模型后重试同一请求，不换模型、不结束这一轮。
+        # maxWaitMs: 0 表示不设插件侧的等待上限，等到有槽位或客户端放弃为止。
+        transport:
+          enabled: true
+          mode: auto
+          port: 43110
+          keepaliveMs: 1200000
+          concurrency:
+            initial: 3
+            max: 3
+            # 网关按模型分别限并发（madmodel-proxy 2026-10-29 实测）：
+            # V4.1-Flash 3、Qwen 4、R1 1；混合 3+4+1=8 路可同时完成。
+            perModel:
+              qwen3.8-27b: 4
+              DeepSeek-R1-W8A8: 1
+            min: 1
+            growAfter: 4
+            queueLimit: 32
+            maxWaitMs: 0
+            heartbeatAfterMs: 20000
+            heartbeatMs: 15000
+            cooldownMs: 5000
+            maxCooldownMs: 120000
+        # 兼容旧字段：仅用于“续期后校验”强制走隧道；新传输层会按实际通道自动选择。
         tunnel: false
         rules:
           # A credential the gateway refuses is exactly what renewal is for:
@@ -107,10 +132,16 @@
         # credentials seam 解析它，续期把新 token 写回同一个引用，两边自动接上。
         apiKeyEnv: TSINGHUA_API_KEY
         api: openai-completions
-        # 只决定模型请求的落点。插件的取票链与上游验证调用走的是 src/auth/chain.ts
-        # 里写死的 SITE（同一个主机），改这里不会改变它们——两者今天一致，但没有
-        # 校验，换主机时两边都要动。
-        baseURL: https://madmodel.cs.tsinghua.edu.cn/v1
+        # 只决定模型请求的落点：本插件的本地传输层，而不是直连网关。
+        # 本地层按网络选择校园直连或 WebVPN 隧道（校外必须走隧道），并把
+        # 当前 token 与隧道 cookie 注入每个请求。端口需与上面 transport.port 一致。
+        baseURL: http://127.0.0.1:43110/v1
+        # 排队等待期间客户端不能先超时：
+        # - timeoutMs 是 pi-ai/SDK 的单请求总预算（默认 10 分钟）
+        # - streamIdleTimeoutMs 是“多久没有新 chunk 算卡死”（默认 5 分钟）
+        # 两者都放到 1 小时，让“等一个槽位再继续”真正成立；如嫌太久可调小。
+        timeoutMs: 3600000
+        streamIdleTimeoutMs: 3600000
         compat:
           supportsDeveloperRole: false
           maxTokensField: max_tokens
@@ -136,3 +167,21 @@
               low: low
               high: high
               max: max
+          - id: qwen3.8-27b
+            name: Qwen 3.8 27B
+            contextWindow: 262144
+            input: [ text, image ]
+            reasoningEfforts:
+              off: none
+              low: low
+              medium: medium
+              high: xhigh
+          - id: DeepSeek-R1-W8A8
+            name: DeepSeek R1 W8A8
+            contextWindow: 131072
+            input: [ text ]
+            reasoningEfforts:
+              off: none
+              low: low
+              medium: medium
+              high: high
