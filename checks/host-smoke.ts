@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict'
 import { apply, isAutomadStatus, resolveOptions } from '../src/index.ts'
-import { loadAuth } from '../src/auth/chain.ts'
+import { loadAuth, SITE } from '../src/auth/chain.ts'
 import { SessionStore } from '../src/auth/session.ts'
 import { probeUpstream } from '../src/auth/verify.ts'
 import { RENEW_PATH, SETTINGS_PATH, STATUS_PATH, TWO_FACTOR_PATH } from '../src/protocol.ts'
@@ -475,6 +475,122 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
     assert.equal(renewer.transportSnapshot().cookie, 'sid=new')
     assert.equal((await session.read()).lastExpiresAt, now + 3 * HOUR)
     assert.equal((await session.read()).tunnelCookie, 'sid=new')
+  } finally {
+    auth.getMadModelToken = getMadModelToken
+    globalThis.fetch = originalFetch
+    renewer.stop()
+    for (const dispose of h.disposers.reverse()) dispose()
+  }
+}
+
+// A login that minted no new token still opened a session, and off campus that
+// session is the only thing that makes the gateway answer. Keeping the old
+// token and adopting the new cookie are separate decisions: discarding the
+// cookie here is how the WebVPN transport could never come up — a token that
+// was not due yet meant "no progress", and the working session went with it.
+{
+  const now = Date.now()
+  const sameToken = token(now - HOUR, now + 3 * HOUR)
+  const h = harness({
+    values: { TSINGHUA_API_KEY: sameToken, MADMODEL_USERNAME: 'fixture-id', MADMODEL_PASSWORD: 'fixture-password' },
+  })
+  const session = new SessionStore(h.ctx)
+  const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true, mode: 'webvpn' } })))
+  const auth = loadAuth()
+  const getMadModelToken = auth.getMadModelToken
+  const originalFetch = globalThis.fetch
+  try {
+    await session.write({ fingerprint: 'a'.repeat(32) })
+    await renewer.refreshFacts()
+    assert.equal(renewer.transportSnapshot().cookie, '', 'no tunnel session before the login')
+    auth.getMadModelToken = async () => ({ token: sameToken, expiresAt: now + 3 * HOUR, cookie: 'sid=webvpn' })
+    globalThis.fetch = async () => new Response(
+      'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n',
+      { headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
+    )
+
+    const stalled = await renewer.ensureFresh('manual')
+    assert.equal(stalled.renewed, false)
+    assert.equal(stalled.code, 'NO_PROGRESS', 'an expiry that did not advance is not a renewal')
+    assert.equal(h.values.TSINGHUA_API_KEY, sameToken, 'the unchanged token is not rewritten')
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=webvpn', 'the session outlives a no-progress renewal')
+    assert.equal((await session.read()).tunnelCookie, 'sid=webvpn', 'and it is stored for the next process start')
+  } finally {
+    auth.getMadModelToken = getMadModelToken
+    globalThis.fetch = originalFetch
+    renewer.stop()
+    for (const dispose of h.disposers.reverse()) dispose()
+  }
+}
+
+// The loopback transport asks the renewal owner to make itself usable after the
+// school's gate refused a request. The answer must come from evidence: the
+// network probe decides which path requests take, and a stored tunnel session is
+// verified before a login is spent on it.
+{
+  const now = Date.now()
+  const live = token(now - HOUR, now + 20 * HOUR)
+  const h = harness({ values: { TSINGHUA_API_KEY: live, MADMODEL_USERNAME: 'fixture-id', MADMODEL_PASSWORD: 'fixture-password' } })
+  const session = new SessionStore(h.ctx)
+  // `auto` on purpose: this case is about the decision the gate forced, so the
+  // transport must be the one that probes rather than a pinned choice.
+  const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true } })))
+  const auth = loadAuth()
+  const getMadModelToken = auth.getMadModelToken
+  const originalFetch = globalThis.fetch
+  let directStatus = 200
+  let tunnelStatus = 200
+  let logins = 0
+  try {
+    auth.getMadModelToken = async () => {
+      logins += 1
+      return { token: live, expiresAt: now + 20 * HOUR, cookie: 'sid=fresh' }
+    }
+    globalThis.fetch = async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url === `${SITE}/v1/models`) {
+        return new Response('page', { status: directStatus, headers: { 'content-type': 'text/html' } })
+      }
+      if (url === `${auth.MADMODEL_VPN_PREFIX}/v1/models`) {
+        return new Response('tunnel', { status: tunnelStatus })
+      }
+      if (url === `${auth.MADMODEL_VPN_PREFIX}/v1/chat/completions`) {
+        return new Response(
+          'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n',
+          { headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
+        )
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }
+
+    // On campus the token in hand is all a request needs: no login, no tunnel.
+    assert.equal(await renewer.ensureTransport(), true, 'the campus path needs no repair')
+    assert.equal(logins, 0, 'returning to campus must not spend a login')
+
+    // Off campus with no session at all: the constructor's case, one login.
+    directStatus = 302
+    await session.write({ fingerprint: 'a'.repeat(32) })
+    await renewer.refreshFacts()
+    assert.equal(await renewer.ensureTransport(), true, 'a tunnel session is established')
+    assert.equal(logins, 1, 'one login, and only because there was no session')
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=fresh')
+    assert.equal((await session.read()).tunnelCookie, 'sid=fresh')
+
+    // A session the tunnel still answers is trusted, not replaced.
+    await session.write({ tunnelCookie: 'sid=live', tunnelCookieAt: now })
+    await renewer.refreshFacts()
+    tunnelStatus = 200
+    assert.equal(await renewer.ensureTransport(), true, 'a live session is usable as it stands')
+    assert.equal(logins, 1, 'a live tunnel session buys no extra login')
+
+    // A session the tunnel redirects on is discarded before the login replaces
+    // it, so a failed login cannot leave the dead cookie in place.
+    await session.write({ tunnelCookie: 'sid=dead', tunnelCookieAt: now })
+    await renewer.refreshFacts()
+    tunnelStatus = 302
+    assert.equal(await renewer.ensureTransport(), true, 'a dead session is replaced')
+    assert.equal(logins, 2, 'exactly one login for the expired session')
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=fresh')
   } finally {
     auth.getMadModelToken = getMadModelToken
     globalThis.fetch = originalFetch

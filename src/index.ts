@@ -138,9 +138,19 @@ export function apply(ctx: Context, config: unknown): void {
         },
         refresh: async () => {
           renewer.clearBackoff()
-          await renewer.ensureFresh('manual')
-          const snapshot = renewer.transportSnapshot()
-          return snapshot.effective === 'direct' || snapshot.cookie !== ''
+          // The transport decides from evidence, not from the cached decision
+          // the gate just contradicted: force the network probe, verify the
+          // stored tunnel session where one exists, and only then spend a login
+          // if the campus path or a live session cannot serve the request.
+          const usable = await renewer.ensureTransport()
+          if (!usable) {
+            const status = renewer.snapshot()
+            ctx.logger.info(
+              `thu-automad: re-authentication did not establish a usable session `
+              + `(${status.lastCode ?? 'UNKNOWN'}: ${status.lastMessage ?? 'no detail'})`,
+            )
+          }
+          return usable
         },
         log: (message: string) => { ctx.logger.info(`thu-automad: ${message}`) },
       }).then((proxy) => {

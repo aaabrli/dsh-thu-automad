@@ -26,6 +26,14 @@
  * Request bodies are buffered (bounded) for one reason: a gate, an expired
  * tunnel session, or a 429 must be retried without losing the body. Responses
  * are streamed, so SSE chunks reach the provider as the upstream produces them.
+ *
+ * ## A gate is not an answer
+ *
+ * When a fresh session still cannot get past the school's gate, that response is
+ * reported locally as a failure with the one action that repairs it. Forwarding
+ * it would let the provider follow a relative login `Location` back into this
+ * loopback server, producing a 404 on `/login` where the model should have been
+ * — a broken-model error for what is really a missing off-campus session.
  * @module dsh-thu-automad/transport/proxy
  */
 
@@ -79,7 +87,14 @@ export interface ProxyOptions {
   concurrency?: ConcurrencyOptions
   /** Current transport facts, or null while no token is configured. */
   resolveAuth: () => Promise<ProxyAuth | null>
-  /** Re-authenticate once and report whether a usable session now exists. */
+  /**
+   * Re-establish the transport after the school's gate refused a request, and
+   * report whether a usable session now exists.
+   *
+   * This is the difference between a recoverable session problem and a broken
+   * turn: returning false makes the proxy report the gate as a failure the user
+   * can act on, instead of forwarding a login redirect into the provider client.
+   */
   refresh: () => Promise<boolean>
   /** Diagnostic sink; never receives credentials. */
   log: (message: string) => void
@@ -120,8 +135,20 @@ const OWNED_HEADERS = new Set([
   'authorization', 'cookie', 'accept-encoding',
 ])
 
-/** Response headers the HTTP layer owns and the proxy must not repeat. */
-const RESPONSE_HOP_HEADERS = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade'])
+/**
+ * Response headers the proxy must not copy to its own client.
+ *
+ * The transport headers are the HTTP layer's. `location` is here for a
+ * different reason: a redirect is how the school's gate answers a request it
+ * does not want to serve, and a relative `Location` handed to a provider client
+ * is resolved against *this* loopback origin — the provider then asks the proxy
+ * for `/login` and gets a 404 instead of an answer. A gate is converted into a
+ * reported failure before headers are copied, and this is the second line of
+ * defence against a path that forgets to.
+ */
+const RESPONSE_HOP_HEADERS = new Set([
+  'connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'location',
+])
 
 /** Headers a keepalive response needs. */
 const SSE_HEADERS = {
@@ -135,6 +162,26 @@ const DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024
 
 /** Socket inactivity budget for one upstream request. */
 const UPSTREAM_IDLE_MS = 10 * 60 * 1000
+
+/**
+ * How long a failed re-authentication stands before another one is attempted.
+ *
+ * A login is a scarce, externally visible action: the school allows one attempt
+ * per identity at a time, and a retry storm against a wrong password or a gate
+ * that no tunnel can pass must not become a login storm. The provider's own
+ * retries arrive within a few seconds of each other, so this window collapses
+ * one turn's worth of retries into one login attempt.
+ */
+const RECOVERY_FAILURE_COOLDOWN_MS = 15_000
+
+/**
+ * Floor between two *successful* re-authentications.
+ *
+ * A gate that survives a freshly minted session is not a session problem, and
+ * answering it with another login would spend the account's attempt budget on
+ * nothing.
+ */
+const RECOVERY_SUCCESS_INTERVAL_MS = 5_000
 
 /** How much of an upstream error body is read for one diagnostic line. */
 const ERROR_BODY_LIMIT = 4096
@@ -152,6 +199,23 @@ interface UpstreamResponse {
   status: number
   headers: IncomingHttpHeaders
   stream: IncomingMessage
+}
+
+/**
+ * One re-authentication, shared by every request that needs it.
+ *
+ * The provider retries a failed step immediately and repeatedly, so five
+ * requests can ask for a new session within one second. The school issues one
+ * login per identity at a time; a per-request attempt would either duplicate
+ * the fingerprint's registration or fail against the first one.
+ */
+interface Recovery {
+  /** When the attempt started, or finished once `running` is null. */
+  at: number
+  /** Whether it produced a usable session. */
+  usable: boolean
+  /** The attempt in flight, or null once it settled. */
+  running: Promise<ProxyAuth | null> | null
 }
 
 /** Keepalive state for one queued streaming request. */
@@ -541,19 +605,7 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES
   const scheduler = new Scheduler(options.concurrency ?? CONCURRENCY_DEFAULTS, options.log, KNOWN_MODELS)
   const state: ProxyStatus = { listening: false, port: options.port, lastError: null, pools: [] }
-  let lastRefreshAt = 0
-
-  const refreshOnce = async (): Promise<boolean> => {
-    const now = Date.now()
-    if (now - lastRefreshAt < 20_000) return false
-    lastRefreshAt = now
-    try {
-      return await options.refresh()
-    } catch (error) {
-      options.log(`re-authentication failed: ${describe(error)}`)
-      return false
-    }
-  }
+  let recovery: Recovery | null = null
 
   const resolveAuth = async (): Promise<ProxyAuth | null> => {
     try {
@@ -561,6 +613,42 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
     } catch (error) {
       options.log(`could not read transport facts: ${describe(error)}`)
       return null
+    }
+  }
+
+  /**
+   * Ask for a usable session once, sharing the attempt with every caller.
+   *
+   * No caller ever waits on a login that another caller already started, and no
+   * settled attempt is repeated inside its cooldown window. That is what keeps
+   * "a stale tunnel cookie buys exactly one re-authentication" true even when a
+   * whole turn's retries arrive together.
+   * @returns transport facts that are now usable, or null when none exist.
+   */
+  const recoverTransport = async (): Promise<ProxyAuth | null> => {
+    if (recovery !== null) {
+      if (recovery.running !== null) return await recovery.running
+      const wait = recovery.usable ? RECOVERY_SUCCESS_INTERVAL_MS : RECOVERY_FAILURE_COOLDOWN_MS
+      if (Date.now() - recovery.at < wait) return null
+    }
+    const entry: Recovery = { at: Date.now(), usable: false, running: null }
+    entry.running = (async (): Promise<ProxyAuth | null> => {
+      let usable = false
+      try {
+        usable = await options.refresh()
+      } catch (error) {
+        options.log(`re-authentication failed: ${describe(error)}`)
+      }
+      const next = usable ? await resolveAuth() : null
+      entry.usable = next !== null
+      entry.at = Date.now()
+      return next
+    })()
+    recovery = entry
+    try {
+      return await entry.running
+    } finally {
+      entry.running = null
     }
   }
 
@@ -609,12 +697,32 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
       return
     }
 
+    // A tunnel session is not optional in webvpn mode: the WebVPN prefix
+    // answers an unauthenticated request with the school's login page, and that
+    // page is precisely what the provider client must never receive. Establish
+    // the session first and only then decide whether the request can be served.
+    let session = auth
+    if (session.mode === 'webvpn' && session.cookie === '') {
+      const recovered = await recoverTransport()
+      if (recovered === null) {
+        sendJson(response, 502, {
+          error: {
+            message: gateMessage('no WebVPN tunnel session could be established'),
+            type: 'thu_automad_transport',
+          },
+        })
+        return
+      }
+      session = recovered
+    }
+
     // Model discovery is a cheap GET, not a completion: no slot is needed and a
-    // 429 there would not be about concurrency. A gate or a lost tunnel session
-    // still gets one re-authentication, like a completion does.
+    // 429 there would not be about concurrency. A gate still gets one
+    // re-authentication, like a completion does.
     if (method === 'GET') {
-      let currentAuth = auth
-      for (let attempt = 0; ; attempt += 1) {
+      let currentAuth = session
+      let recovered = false
+      for (;;) {
         let upstream: UpstreamResponse
         try {
           upstream = await dispatch(method, path, body, request.headers, currentAuth)
@@ -624,14 +732,20 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
           })
           return
         }
-        if (attempt === 0 && needsSessionRefresh(upstream, path)) {
+        if (isGateResponse(upstream, path)) {
           drain(upstream.stream)
-          const refreshed = await refreshOnce()
-          const next = refreshed ? await resolveAuth() : null
-          if (next !== null) {
-            currentAuth = next
-            continue
+          if (!recovered) {
+            recovered = true
+            const next = await recoverTransport()
+            if (next !== null) {
+              currentAuth = next
+              continue
+            }
           }
+          sendJson(response, 502, {
+            error: { message: gateMessage(gateDetail(upstream)), type: 'thu_automad_transport' },
+          })
+          return
         }
         handOff(upstream, response, false, () => {})
         return
@@ -676,8 +790,8 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
           return
         }
         try {
-          let currentAuth = auth
-          let refreshUsed = false
+          let currentAuth = session
+          let recovered = false
           for (;;) {
             let upstream: UpstreamResponse
             try {
@@ -697,15 +811,27 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
               activeSlot = null
               break
             }
-            if (needsSessionRefresh(upstream, path) && !refreshUsed) {
-              refreshUsed = true
+            if (isGateResponse(upstream, path)) {
+              // The school's gate answered, not the gateway. Handing this
+              // response on would let the provider resolve its redirect against
+              // this loopback origin and turn a session problem into a 404 for
+              // `/login`, which it has no way to report as anything but a
+              // broken model. Convert it here, once, after one recovery try.
               drain(upstream.stream)
-              const refreshed = await refreshOnce()
-              const next = refreshed ? await resolveAuth() : null
-              if (next !== null) {
-                currentAuth = next
-                continue
+              if (!recovered) {
+                recovered = true
+                const next = await recoverTransport()
+                if (next !== null) {
+                  currentAuth = next
+                  continue
+                }
               }
+              scheduler.stopHeartbeat(waiting)
+              slot.release(false)
+              slot = null
+              activeSlot = null
+              fail(response, waiting, 502, gateMessage(gateDetail(upstream)))
+              return
             }
             scheduler.stopHeartbeat(waiting)
             if (waiting.stopped || response.destroyed) {
@@ -884,24 +1010,47 @@ function copyRequestHeaders(incoming: IncomingHttpHeaders): Record<string, strin
 }
 
 /**
- * Whether a response means the transport lost its session rather than the
- * request being wrong.
+ * Whether a response is the school's gate rather than the gateway's answer.
  *
- * A redirect is the school's gate (both the OAuth gate and the tunnel's login
- * page answer with one). For completions a login page can also arrive as HTTP
- * 200, which no completion ever is, so that shape counts too; `/v1/models`
- * legitimately answers with the application's HTML shell on campus, so it is
- * excluded.
+ * A redirect is the gate itself: the OAuth form off campus, or the WebVPN login
+ * page when the tunnel session is missing or expired. A completion answered
+ * with the application's HTML shell is the same gate wearing HTTP 200, which no
+ * completion ever is; `/v1/models` legitimately answers with that shell on
+ * campus, so it is excluded.
+ *
+ * The distinction matters beyond retries: a gate must never reach the client.
+ * Its `Location` is usually relative, and a provider client resolves it against
+ * this loopback origin, so forwarding it produces a `GET /login` against the
+ * proxy instead of a model answer.
  * @param response - upstream response headers.
  * @param path - request path.
- * @returns true when one re-authentication is worth a retry.
+ * @returns true when the response is a gate the proxy must handle itself.
  */
-function needsSessionRefresh(response: UpstreamResponse, path: string): boolean {
+function isGateResponse(response: UpstreamResponse, path: string): boolean {
   if (response.status >= 300 && response.status < 400) return true
   if (!path.startsWith('/v1/chat/')) return false
   if (response.status < 200 || response.status >= 300) return false
   const type = String(response.headers['content-type'] ?? '')
   return type.includes('text/html')
+}
+
+/** Name one gate response the transport could not get past. */
+function gateDetail(response: UpstreamResponse): string {
+  if (response.status >= 300 && response.status < 400) {
+    return `the school's gateway redirected the request (HTTP ${String(response.status)})`
+  }
+  return `the school's gateway answered with its application page (HTTP ${String(response.status)})`
+}
+
+/**
+ * Wording for a gate the transport failed to resolve, including the one action
+ * that actually repairs it. No credential, URL or cookie value is included.
+ * @param detail - what the upstream did, from {@link gateDetail}.
+ * @returns the message the provider reports for this turn.
+ */
+function gateMessage(detail: string): string {
+  return `thu-automad: ${detail} and re-authentication did not establish a usable session. `
+    + 'Off campus this needs the WebVPN tunnel: open 设置 → 清华 MadModel and press 立即续期, then retry'
 }
 
 /** Read a `Retry-After` header as milliseconds, when present and usable. */

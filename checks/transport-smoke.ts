@@ -125,6 +125,167 @@ const proxy = await startTransportProxy({
   assert.equal(last?.cookie, GOOD_COOKIE, 'the plugin cookie travels with the request')
 }
 
+// ── the school's gate never reaches the provider ──────────────────────────
+
+/**
+ * A gate that no re-authentication can resolve must be reported, not forwarded.
+ *
+ * This is the exact production shape: the tunnel answered `302 Location:
+ * /login`, the proxy handed that response to the provider, and the provider —
+ * which resolves a relative `Location` against its own baseURL — asked the
+ * loopback for `/login` and got a 404. The turn then died reporting an
+ * unsupported path, which says nothing about the missing session.
+ */
+{
+  let logins = 0
+  const gate = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      response.writeHead(302, { location: '/login' })
+      response.end()
+    })
+  })
+  await new Promise<void>((resolve, reject) => {
+    gate.once('error', reject)
+    gate.listen(0, '127.0.0.1', () => { resolve() })
+  })
+  gate.unref()
+  const origin = `http://127.0.0.1:${String((gate.address() as AddressInfo).port)}`
+  const blocked = await startTransportProxy({
+    port: 0,
+    resolveAuth: async () => ({ token: TOKEN, mode: 'webvpn', cookie: GOOD_COOKIE, tunnelPrefix: origin }),
+    refresh: async () => {
+      logins += 1
+      return false
+    },
+    log: () => {},
+  })
+  const send = (): Promise<Response> => fetch(`http://127.0.0.1:${String(blocked.port)}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'DeepSeek-V4.1-Flash', messages: [], stream: true }),
+  })
+
+  const response = await send()
+  assert.equal(response.status, 502, 'a gate is reported instead of being forwarded')
+  assert.equal(response.headers.get('location'), null, 'a login redirect never reaches the provider')
+  const body = await response.json() as { error: { message: string; type: string } }
+  assert.equal(body.error.type, 'thu_automad_transport')
+  assert.match(body.error.message, /redirected/u, 'the message says the gateway redirected')
+  assert.match(body.error.message, /立即续期/u, 'the message names the one action that repairs it')
+  assert.equal(logins, 1, 'one gate buys exactly one re-authentication')
+
+  // The provider retries a failed step immediately; those retries must not each
+  // cost the account a login attempt against the school.
+  const retried = await send()
+  assert.equal(retried.status, 502)
+  await retried.text()
+  assert.equal(logins, 1, 'a retry storm spends one login, not one per request')
+  await blocked.close()
+  await new Promise<void>((resolve) => { gate.close(() => { resolve() }) })
+}
+
+// ── the production shape: off campus with no tunnel session at all ────────
+
+/**
+ * The incident this transport was fixed for: the Wi-Fi switches to a phone
+ * hotspot, the network decision flips to `webvpn`, and no session has ever been
+ * established. The gateway must not be asked a question only a login page can
+ * answer, and the provider must not receive that page either.
+ */
+{
+  let dispatched = 0
+  const silent = createServer((request, response) => {
+    dispatched += 1
+    request.resume()
+    request.on('end', () => {
+      response.writeHead(302, { location: '/login' })
+      response.end()
+    })
+  })
+  await new Promise<void>((resolve, reject) => {
+    silent.once('error', reject)
+    silent.listen(0, '127.0.0.1', () => { resolve() })
+  })
+  silent.unref()
+  const origin = `http://127.0.0.1:${String((silent.address() as AddressInfo).port)}`
+  const cold = await startTransportProxy({
+    port: 0,
+    resolveAuth: async () => ({ token: TOKEN, mode: 'webvpn', cookie: '', tunnelPrefix: origin }),
+    refresh: async () => false,
+    log: () => {},
+  })
+  const response = await fetch(`http://127.0.0.1:${String(cold.port)}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'DeepSeek-V4.1-Flash', messages: [], stream: true }),
+  })
+  assert.equal(response.status, 502)
+  const body = await response.json() as { error: { message: string } }
+  assert.match(body.error.message, /no WebVPN tunnel session/u)
+  assert.match(body.error.message, /立即续期/u)
+  assert.equal(dispatched, 0, 'a request with no session is never dispatched to the gate')
+  await cold.close()
+  await new Promise<void>((resolve) => { silent.close(() => { resolve() }) })
+}
+
+/**
+ * A tunnel without a session must sign in before it dispatches.
+ *
+ * Dispatching first can only earn the login page, and the recovery step is then
+ * paid on top of the failed round trip. The provider waits; the school sees one
+ * request instead of two.
+ */
+{
+  let signedIn = false
+  let logins = 0
+  const cookies: (string | undefined)[] = []
+  const tunnel = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      cookies.push(request.headers.cookie)
+      if (request.headers.cookie !== GOOD_COOKIE) {
+        response.writeHead(302, { location: '/login' })
+        response.end()
+        return
+      }
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.end('data: [DONE]\n\n')
+    })
+  })
+  await new Promise<void>((resolve, reject) => {
+    tunnel.once('error', reject)
+    tunnel.listen(0, '127.0.0.1', () => { resolve() })
+  })
+  tunnel.unref()
+  const origin = `http://127.0.0.1:${String((tunnel.address() as AddressInfo).port)}`
+  const cold = await startTransportProxy({
+    port: 0,
+    resolveAuth: async () => ({
+      token: TOKEN,
+      mode: 'webvpn',
+      cookie: signedIn ? GOOD_COOKIE : '',
+      tunnelPrefix: origin,
+    }),
+    refresh: async () => {
+      logins += 1
+      signedIn = true
+      return true
+    },
+    log: () => {},
+  })
+  const response = await fetch(`http://127.0.0.1:${String(cold.port)}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'DeepSeek-V4.1-Flash', messages: [], stream: true }),
+  })
+  assert.equal(response.status, 200, 'the session is established before the request is dispatched')
+  assert.equal(logins, 1, 'one sign-in, and no wasted gate round trip')
+  assert.deepEqual(cookies, [GOOD_COOKIE], 'the gate was never asked without a session')
+  await cold.close()
+  await new Promise<void>((resolve) => { tunnel.close(() => { resolve() }) })
+}
+
 // Model discovery is served by the loopback itself: no credential, no upstream
 // call, and no admission slot. This is the request shape an SDK picks when its
 // baseURL handling drops `/v1`, and it must not turn into a 404.

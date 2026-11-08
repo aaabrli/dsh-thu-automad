@@ -351,6 +351,36 @@ export class Renewer {
   }
 
   /**
+   * Make the transport usable for the network this process is on now.
+   *
+   * This is what the loopback transport asks for after the school's gate has
+   * refused a request. Two things are decided here, not guessed:
+   *
+   * The network decision is forced, because the gate just contradicted the
+   * cached one — a Wi-Fi switch is exactly when that cache is wrong. On the
+   * campus path the token already in hand is all a request needs, so returning
+   * to campus recovers without touching the school at all.
+   *
+   * Off campus a request is only as good as its tunnel session, and a cookie can
+   * outlive the session it belongs to. So the stored session is *verified*
+   * rather than assumed: a live one needs no repair, an expired one must be
+   * discarded before the login replaces it, and a probe that could not reach the
+   * tunnel says nothing either way — the login is the only thing that can
+   * improve that state, and a login that fails leaves the old cookie untouched,
+   * so unreliable evidence never costs the current session.
+   * @returns whether a usable transport now exists.
+   */
+  async ensureTransport(): Promise<boolean> {
+    const mode = await this.detectTransport(true)
+    if (mode !== 'webvpn') return true
+    const verdict: TunnelVerdict = this.cookie === '' ? 'invalid' : await this.probeTunnelSession()
+    if (verdict === 'ok') return true
+    if (verdict === 'invalid') await this.discardTunnelSession()
+    await this.ensureFresh('manual')
+    return this.cookie !== ''
+  }
+
+  /**
    * Keep the WebVPN tunnel alive between token renewals.
    *
    * The tunnel drops an idle session after roughly two hours, which is shorter
@@ -367,15 +397,36 @@ export class Renewer {
       await this.ensureTunnelSession()
       return
     }
+    const verdict = await this.probeTunnelSession()
+    if (verdict !== 'invalid') return
+    await this.discardTunnelSession()
+    await this.ensureTunnelSession()
+  }
+
+  /**
+   * Ask the tunnel whether the stored session cookie is still served.
+   * @returns the verdict, recorded for the status page.
+   */
+  private async probeTunnelSession(): Promise<TunnelVerdict> {
     const auth = loadAuth()
     const verdict = await auth.probeWebvpnSession(auth.MADMODEL_TUNNEL_MODELS_URL, this.cookie)
     this.probeAt = Date.now()
     this.probeVerdict = verdict
-    if (verdict === 'invalid') {
-      this.cookie = ''
-      this.cookieAt = null
-      await this.ensureTunnelSession()
-    }
+    return verdict
+  }
+
+  /**
+   * Forget the stored tunnel session.
+   *
+   * Discarding before a login matters: the login replaces the cookie only on
+   * success, so a session the tunnel has already rejected would otherwise stay
+   * in place and keep answering the login page.
+   */
+  private async discardTunnelSession(): Promise<void> {
+    if (this.cookie === '' && this.facts.tunnelCookie === null) return
+    this.cookie = ''
+    this.cookieAt = null
+    this.facts = await this.session.write({ tunnelCookie: null, tunnelCookieAt: null })
   }
 
   /** Run one renewal attempt and fold its outcome into the reported state. */
@@ -453,6 +504,12 @@ export class Renewer {
       this.lastMessage = 'the school returned the same token: its expiry did not advance, so nothing was renewed'
       this.retryAt = null
       this.nextAttemptAt = outcome.expiresAt
+      // Nothing was renewed, but a session was still opened: the tunnel cookie
+      // is not part of the token, and off campus it is the only thing that
+      // makes the gateway answer at all. Dropping it here is how the WebVPN
+      // path could never come up — a token that was not due yet meant "no
+      // progress", and the one working cookie went with it.
+      await this.adoptTunnelSession(outcome)
       return { renewed: false, code: 'NO_PROGRESS', message: this.lastMessage }
     }
 
@@ -489,6 +546,27 @@ export class Renewer {
     this.lastMessage = `renewed on ${reason}; the new token expires at ${new Date(outcome.expiresAt).toISOString()}`
     this.nextAttemptAt = outcome.expiresAt - this.options.renew.refreshAheadMs
     return { renewed: true, code: null, message: this.lastMessage }
+  }
+
+  /**
+   * Adopt the WebVPN session a login opened, when it minted no new token.
+   *
+   * The tunnel cookie belongs to the session, not to the token: it is what makes
+   * the tunneled host answer, and it stays valid while the old token does. The
+   * two facts are therefore decided separately — only the token has to move for
+   * a renewal to count, and only the cookie has to exist for the transport to
+   * work off campus.
+   * @param outcome - what the login produced.
+   */
+  private async adoptTunnelSession(outcome: LoginOutcome): Promise<void> {
+    const cookie = outcome.ticketSource === 'webvpn' ? outcome.cookie : ''
+    if (cookie === '') return
+    this.cookie = cookie
+    this.cookieAt = Date.now()
+    this.facts = await this.session.write({
+      tunnelCookie: this.cookie,
+      tunnelCookieAt: this.cookieAt,
+    })
   }
 
   /**
