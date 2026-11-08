@@ -35,7 +35,6 @@ export const css = {
   cardLife: 'taCardLife',
   cardRule: 'taCardRule',
   cardPools: 'taCardPools',
-  poolLabel: 'taPoolLabel',
   pool: 'taPool',
   poolName: 'taPoolName',
   poolCount: 'taPoolCount',
@@ -307,21 +306,36 @@ const STYLESHEET = `
 .taCardLife[data-tone="error"] > i { background: var(--ta-error); }
 .taCardRule { border-top: .5px solid var(--ta-line); margin: 12px 0 10px; }
 
-/* Admission strip: one group per model, one segment per slot that model is
-   allowed, filled up to the requests in flight. */
-.taCardPools { display: flex; align-items: center; gap: 13px; flex-wrap: wrap; }
-.taPoolLabel { color: var(--ta-subtle); font-size: 11px; }
-.taPool { display: inline-flex; align-items: center; gap: 5px; }
-.taPoolName { color: var(--ta-subtle); font-size: 11px; }
-.taPoolCount { color: var(--ta-ink); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.taPoolCount[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 82%, var(--ta-ink)); }
-.taPoolCount[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); }
-.taPoolQueued { color: var(--ta-warn); font-size: 11px; font-variant-numeric: tabular-nums; }
-.taSegs { display: inline-flex; gap: 2px; }
+/* Admission list: one row per model — the whole id, its slots, its queue. A
+   single horizontal strip cannot hold three full ids, and an abbreviation like
+   V4.1/Qwen/R1 is exactly the part a user cannot verify. */
+.taCardPools { display: grid; gap: 2px; }
+.taPool { display: flex; align-items: center; gap: 8px; min-width: 0; line-height: 16px; }
+.taPoolName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ta-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.taSegs { flex: none; display: inline-flex; gap: 2px; }
 .taSeg { width: 5px; height: 12px; border-radius: 1.5px; background: color-mix(in srgb, var(--ta-ink) 12%, transparent); }
 .taSeg[data-on] { background: var(--ta-accent); }
 .taSeg[data-on][data-tone="warn"] { background: var(--ta-warn); }
 .taSeg[data-on][data-tone="error"] { background: var(--ta-error); }
+.taPoolCount {
+  flex: none;
+  min-width: 30px;
+  color: var(--ta-ink);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.taPoolCount[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 82%, var(--ta-ink)); }
+.taPoolCount[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); }
+.taPoolQueued { flex: none; color: var(--ta-warn); font-size: 11px; font-variant-numeric: tabular-nums; }
 
 @media (prefers-reduced-motion: reduce) {
   .taCardLife > i { transition: none; }

@@ -21,7 +21,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type { RenewStatus, TokenStatus, TransportStatus } from '../protocol.ts'
 import type { ReadingInjected } from './Reading.tsx'
-import { formatTime, modelLabel } from './format.ts'
+import { formatTime } from './format.ts'
 import { NS } from './locale.ts'
 import { STATUS_PILL_READING } from './slots.ts'
 import { css } from './styles.ts'
@@ -146,10 +146,7 @@ export const StatusLink = memo(function StatusLink({
             </div>
             <LifetimeBar token={status.token} tone={token?.tone ?? 'idle'} />
             <div className={css.cardRule} aria-hidden="true" />
-            <div className={css.cardPools}>
-              <span className={css.poolLabel}>{t('link.cardPools')}</span>
-              {poolReadings(status.transport, t)}
-            </div>
+            <div className={css.cardPools}>{poolReadings(status.transport, t)}</div>
           </>
         )}
       </div>
@@ -216,16 +213,15 @@ function renewalFact(renew: RenewStatus, t: TranslateNS<typeof NS>): { text: str
 }
 
 /**
- * The admission strip: every model's share of the gateway's own ceiling.
+ * The admission list: one row per model, against the gateway's own ceiling.
  *
  * The ceilings are per model (3 + 4 + 1 = 8 slots on the shipped configuration),
- * so one total hides which model is saturated. Each group shows the model's
- * short name, one segment per allowed slot, and the exact count; a queue adds
- * its own badge and a saturated or paused model colours both. The full model id
- * and the queue counts travel in the title.
+ * so one total hides which model is saturated — and a three-letter abbreviation
+ * hides which model it is, which is the part a reader cannot verify. A row per
+ * model fits the whole id, its slots and its queue without a legend.
  * @param transport - transport facts, absent while the loopback is starting.
  * @param t - locale seat.
- * @returns one element per known model.
+ * @returns one row per known model.
  */
 function poolReadings(transport: TransportStatus | undefined, t: TranslateNS<typeof NS>): ReactNode {
   const pools = transport?.pools ?? []
@@ -244,9 +240,9 @@ function poolReadings(transport: TransportStatus | undefined, t: TranslateNS<typ
       <span
         key={pool.model}
         className={css.pool}
-        title={`${pool.model} · ${t('link.cardQueue', { running: String(pool.inFlight), queued: String(pool.queued) })}`}
+        title={`${t('link.cardQueue', { running: String(pool.inFlight), queued: String(pool.queued) })}`}
       >
-        <span className={css.poolName}>{modelLabel(pool.model)}</span>
+        <span className={css.poolName}>{pool.model}</span>
         {slots.length === 0 ? null : (
           <span className={css.segs} aria-hidden="true">
             {slots.map(index => (

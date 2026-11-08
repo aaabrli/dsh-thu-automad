@@ -569,6 +569,11 @@ assert.ok(
 const human = card.find(node => node.type === 'dd' && node.props.children === t('settings.renew.needsHuman'))
 assert.equal(human?.props['data-tone'], 'error', 'the status card shows the needs-human renewal state')
 assert.deepEqual(
+  card.filter(node => node.type === 'span' && node.props.className === 'taPoolName').map(node => node.props.children),
+  ['DeepSeek-V4.1-Flash', 'qwen3.8-27b', 'DeepSeek-R1-W8A8'],
+  'each row carries the model id the Host reports, unabbreviated',
+)
+assert.deepEqual(
   card.filter(node => node.type === 'span' && node.props.className === 'taPoolCount').map(node => node.props.children),
   ['3/3', '1/4', '0/1'],
   'every model reports its own share of the ceiling',

@@ -186,7 +186,6 @@ export const en = {
   'link.loading': 'Reading status…',
   'link.cardQueue': '{running} running · {queued} queued',
   'link.cardRemaining': 'left',
-  'link.cardPools': 'pools',
 } as const
 
 /** Simplified Chinese dictionary. */
@@ -362,7 +361,6 @@ export const zh: Record<keyof typeof en, string> = {
   'link.loading': '正在读取状态…',
   'link.cardQueue': '{running} 在跑 · {queued} 排队',
   'link.cardRemaining': '剩余',
-  'link.cardPools': '并发',
 }
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
