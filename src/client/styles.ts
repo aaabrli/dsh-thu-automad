@@ -39,6 +39,7 @@ export const css = {
   poolName: 'taPoolName',
   poolCount: 'taPoolCount',
   poolQueued: 'taPoolQueued',
+  poolPaused: 'taPoolPaused',
   segs: 'taSegs',
   seg: 'taSeg',
   hidden: 'taHidden',
@@ -304,7 +305,7 @@ const STYLESHEET = `
   background: linear-gradient(90deg, color-mix(in srgb, var(--ta-warn) 60%, var(--ta-ink)), var(--ta-warn));
 }
 .taCardLife[data-tone="error"] > i { background: var(--ta-error); }
-.taCardRule { border-top: .5px solid var(--ta-line); margin: 8px 0 6px; }
+.taCardRule { border-top: .5px solid var(--ta-line); margin: 7px 0 5px; }
 
 /* Admission list: one row per model — the whole id, its slots, its queue. A
    single horizontal strip cannot hold three full ids, and an abbreviation like
@@ -336,6 +337,7 @@ const STYLESHEET = `
 .taPoolCount[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 82%, var(--ta-ink)); }
 .taPoolCount[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); }
 .taPoolQueued { flex: none; color: var(--ta-warn); font-size: 11px; font-variant-numeric: tabular-nums; }
+.taPoolPaused { flex: none; color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); font-size: 11px; font-variant-numeric: tabular-nums; }
 
 @media (prefers-reduced-motion: reduce) {
   .taCardLife > i { transition: none; }

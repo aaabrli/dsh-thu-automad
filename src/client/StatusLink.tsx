@@ -19,10 +19,11 @@ import type { ReactNode } from 'react'
 import type {
   InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, TranslateNS,
 } from '@deepseek-ai/dsh-client-ui-slots'
-import type { RenewStatus, TokenStatus, TransportStatus } from '../protocol.ts'
+import type { RenewStatus, TokenStatus, TransportPoolStatus, TransportStatus } from '../protocol.ts'
 import type { ReadingInjected } from './Reading.tsx'
 import { formatTime } from './format.ts'
 import { NS } from './locale.ts'
+import { renewFailureText } from './renew-copy.ts'
 import { STATUS_PILL_READING } from './slots.ts'
 import { css } from './styles.ts'
 import { useCountdown } from './use-countdown.ts'
@@ -141,7 +142,11 @@ export const StatusLink = memo(function StatusLink({
               </div>
               <dl className={css.cardFacts}>
                 <Fact label={t('settings.overview.network')} value={networkReading(status.transport, t)} />
-                <Fact label={t('settings.overview.renew')} value={renewalFact(status.renew, t)} />
+                <Fact
+                  label={t('settings.overview.renew')}
+                  value={renewalFact(status.renew, t)}
+                  title={renewalDetail(status.renew, t)}
+                />
               </dl>
             </div>
             <LifetimeBar token={status.token} tone={token?.tone ?? 'idle'} />
@@ -166,11 +171,11 @@ function positionCard(card: HTMLElement, button: HTMLElement): void {
 }
 
 /** One right-aligned label/value pair in the facts column. */
-function Fact({ label, value }: { label: string; value: { text: string; tone: Tone } }) {
+function Fact({ label, value, title }: { label: string; value: { text: string; tone: Tone }; title?: string }) {
   return (
     <div>
       <dt>{label}</dt>
-      <dd data-tone={value.tone}>{value.text}</dd>
+      <dd data-tone={value.tone} title={title}>{value.text}</dd>
     </div>
   )
 }
@@ -226,38 +231,64 @@ function renewalFact(renew: RenewStatus, t: TranslateNS<typeof NS>): { text: str
 function poolReadings(transport: TransportStatus | undefined, t: TranslateNS<typeof NS>): ReactNode {
   const pools = transport?.pools ?? []
   if (pools.length === 0) return <span className={css.poolCount}>—</span>
-  return pools.map((pool) => {
-    // `ceiling` is optional on the wire; the admission limit is the same number
-    // on a profile that never ramps, so an older Host still renders a reading.
-    const ceiling = pool.ceiling ?? pool.limit
-    const paused = pool.pausedUntil !== null && pool.pausedUntil > Date.now()
-    const full = ceiling > 0 && pool.inFlight >= ceiling
-    const tone: Tone = paused ? 'error' : full ? 'warn' : 'idle'
-    const slots = ceiling > 0 && ceiling <= MAX_SEGMENTS
-      ? Array.from({ length: ceiling }, (_unused, index) => index)
-      : []
-    return (
-      <span
-        key={pool.model}
-        className={css.pool}
-        title={`${t('link.cardQueue', { running: String(pool.inFlight), queued: String(pool.queued) })}`}
-      >
-        <span className={css.poolName}>{pool.model}</span>
-        {slots.length === 0 ? null : (
-          <span className={css.segs} aria-hidden="true">
-            {slots.map(index => (
-              <i
-                key={index}
-                className={css.seg}
-                data-on={index < pool.inFlight ? 'true' : undefined}
-                data-tone={tone}
-              />
-            ))}
-          </span>
-        )}
-        <span className={css.poolCount} data-tone={tone}>{`${String(pool.inFlight)}/${String(ceiling)}`}</span>
-        {pool.queued > 0 ? <span className={css.poolQueued}>{`+${String(pool.queued)}`}</span> : null}
-      </span>
-    )
-  })
+  return pools.map(pool => <PoolRow key={pool.model} pool={pool} t={t} />)
+}
+
+/**
+ * One model's row: slots, count, queue, and — while the gateway has it paused —
+ * how long the 429 cooldown has left. The countdown lives here rather than in
+ * the parent so only a paused row keeps a timer alive.
+ */
+function PoolRow({ pool, t }: { pool: TransportPoolStatus; t: TranslateNS<typeof NS> }) {
+  const cooldown = useCountdown(pool.pausedUntil)
+  // `ceiling` is optional on the wire; the admission limit is the same number
+  // on a profile that never ramps, so an older Host still renders a reading.
+  const ceiling = pool.ceiling ?? pool.limit
+  const paused = pool.pausedUntil !== null && pool.pausedUntil > Date.now()
+  const full = ceiling > 0 && pool.inFlight >= ceiling
+  const tone: Tone = paused ? 'error' : full ? 'warn' : 'idle'
+  const slots = ceiling > 0 && ceiling <= MAX_SEGMENTS
+    ? Array.from({ length: ceiling }, (_unused, index) => index)
+    : []
+  const counts = t('link.cardQueue', { running: String(pool.inFlight), queued: String(pool.queued) })
+  return (
+    <span
+      className={css.pool}
+      title={paused && cooldown !== null ? `${t('settings.queue.cooldown', { remaining: cooldown })} · ${counts}` : counts}
+    >
+      <span className={css.poolName}>{pool.model}</span>
+      {slots.length === 0 ? null : (
+        <span className={css.segs} aria-hidden="true">
+          {slots.map(index => (
+            <i
+              key={index}
+              className={css.seg}
+              data-on={index < pool.inFlight ? 'true' : undefined}
+              data-tone={tone}
+            />
+          ))}
+        </span>
+      )}
+      <span className={css.poolCount} data-tone={tone}>{`${String(pool.inFlight)}/${String(ceiling)}`}</span>
+      {pool.queued > 0 ? <span className={css.poolQueued}>{`+${String(pool.queued)}`}</span> : null}
+      {paused && cooldown !== null
+        ? <span className={css.poolPaused}>{t('settings.queue.cooldown', { remaining: cooldown })}</span>
+        : null}
+    </span>
+  )
+}
+
+/**
+ * The Host's explanation for the last failed renewal, for the row's tooltip.
+ *
+ * The card only has room for a state word; the reason (and the Host's own
+ * diagnostic when no code covers it) rides along in the title, so diagnosing a
+ * failed renewal does not require opening the settings page.
+ * @param renew - renewal state from the status document.
+ * @param t - locale seat.
+ * @returns the explanation, or undefined when the last attempt did not fail.
+ */
+function renewalDetail(renew: RenewStatus, t: TranslateNS<typeof NS>): string | undefined {
+  if (renew.lastCode === null) return undefined
+  return renewFailureText(renew.lastCode, renew.lastMessage, t) ?? renew.lastMessage ?? renew.lastCode
 }

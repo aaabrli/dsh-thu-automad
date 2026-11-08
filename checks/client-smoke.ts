@@ -547,7 +547,7 @@ serve(status({
     pools: [
       { model: 'DeepSeek-V4.1-Flash', limit: 3, ceiling: 3, inFlight: 3, queued: 0, pausedUntil: null },
       { model: 'qwen3.8-27b', limit: 4, ceiling: 4, inFlight: 1, queued: 0, pausedUntil: null },
-      { model: 'DeepSeek-R1-W8A8', limit: 1, ceiling: 1, inFlight: 0, queued: 2, pausedUntil: null },
+      { model: 'DeepSeek-R1-W8A8', limit: 1, ceiling: 1, inFlight: 0, queued: 2, pausedUntil: Date.now() + 30_000 },
     ],
     queueLimit: 32,
   },
@@ -594,6 +594,9 @@ assert.ok(
   card.some(node => node.type === 'span' && node.props.className === 'taPoolCount' && node.props['data-tone'] === 'warn'),
   'a model at its ceiling is marked',
 )
+const paused = card.find(node => node.type === 'span' && node.props.className === 'taPoolPaused')
+assert.match(String(paused?.props.children), /429/u, 'a paused model shows how long its cooldown has left')
+assert.match(String(human?.props.title), /student id/u, 'the renewal row explains the failure on hover')
 assert.match(stylesheet, /--dsw-specific-menu/u, 'the popover uses the shell\u2019s menu surface')
 assert.match(stylesheet, /--ta-accent/u, 'and draws its accent from a theme-aware token')
 
