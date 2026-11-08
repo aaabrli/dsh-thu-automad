@@ -266,19 +266,19 @@ const STYLESHEET = `
 /* Hero: the remaining lifetime is what this card exists to report, so it owns
    the one large figure; the two facts sit beside it, right-aligned. */
 .taCardBody { display: flex; align-items: flex-end; gap: 16px; margin-top: 5px; }
-.taCardHero { flex: none; }
+.taCardHero { flex: none; display: flex; align-items: baseline; gap: 6px; }
 .taCardHero b {
   display: block;
   font-size: 22px;
-  line-height: 25px;
+  line-height: 23px;
   font-weight: 500;
   letter-spacing: -.01em;
   color: var(--ta-ink);
   font-variant-numeric: tabular-nums;
 }
-.taCardHero span { display: block; margin-top: 1px; font-size: 11px; line-height: 14px; color: var(--ta-subtle); }
-.taCardFacts { margin: 0 0 0 auto; padding: 0; display: grid; gap: 2px; }
-.taCardFacts div { display: flex; justify-content: flex-end; align-items: baseline; gap: 6px; }
+.taCardHero span { font-size: 11px; line-height: 23px; color: var(--ta-subtle); }
+.taCardFacts { margin: 0 0 0 auto; padding: 0; display: grid; }
+.taCardFacts div { display: flex; justify-content: flex-end; align-items: baseline; gap: 6px; line-height: 15px; }
 .taCardFacts dt { margin: 0; color: var(--ta-subtle); font-size: 11px; font-weight: 400; }
 .taCardFacts dd { margin: 0; color: var(--ta-ink); font-variant-numeric: tabular-nums; }
 .taCardFacts dd[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 78%, var(--ta-ink)); }
@@ -286,7 +286,7 @@ const STYLESHEET = `
 
 /* Lifetime meter, tinted by the same tone the state reports. */
 .taCardLife {
-  margin-top: 9px;
+  margin-top: 8px;
   height: 3px;
   border-radius: 2px;
   background: color-mix(in srgb, var(--ta-ink) 10%, transparent);
@@ -304,13 +304,13 @@ const STYLESHEET = `
   background: linear-gradient(90deg, color-mix(in srgb, var(--ta-warn) 60%, var(--ta-ink)), var(--ta-warn));
 }
 .taCardLife[data-tone="error"] > i { background: var(--ta-error); }
-.taCardRule { border-top: .5px solid var(--ta-line); margin: 12px 0 10px; }
+.taCardRule { border-top: .5px solid var(--ta-line); margin: 8px 0 6px; }
 
 /* Admission list: one row per model — the whole id, its slots, its queue. A
    single horizontal strip cannot hold three full ids, and an abbreviation like
    V4.1/Qwen/R1 is exactly the part a user cannot verify. */
 .taCardPools { display: grid; gap: 2px; }
-.taPool { display: flex; align-items: center; gap: 8px; min-width: 0; line-height: 16px; }
+.taPool { display: flex; align-items: center; gap: 8px; min-width: 0; line-height: 15px; }
 .taPoolName {
   flex: 1 1 auto;
   min-width: 0;
