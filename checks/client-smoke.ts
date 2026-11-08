@@ -557,22 +557,40 @@ resetHooks()
 const card = flatten(render(dock.component, { ...baseProps, renderSlot: () => null }) as ElementDescriptor)
 assert.deepEqual(
   card.filter(node => node.type === 'dt').map(node => node.props.children),
-  [t('settings.overview.token'), t('settings.overview.network'), t('settings.overview.renew'), t('settings.section.queue')],
-  'the card carries the shell\u2019s four definition rows',
+  [t('settings.overview.network'), t('settings.overview.renew')],
+  'the slow-moving facts are a definition list beside the hero figure',
+)
+const hero = card.find(node => node.type === 'b')
+assert.match(String(hero?.props.children), /^\d+h(\d+m)?$/u, 'the remaining lifetime owns the one large figure')
+assert.ok(
+  card.some(node => node.type === 'span' && node.props.className === 'taCardState' && node.props['data-tone'] === 'ok'),
+  'the token state is reported in the header',
 )
 const human = card.find(node => node.type === 'dd' && node.props.children === t('settings.renew.needsHuman'))
 assert.equal(human?.props['data-tone'], 'error', 'the status card shows the needs-human renewal state')
 assert.deepEqual(
   card.filter(node => node.type === 'span' && node.props.className === 'taPoolCount').map(node => node.props.children),
-  ['3/3', '1/4', '0/1', '+2'],
-  'every model reports its own share of the eight admission slots',
+  ['3/3', '1/4', '0/1'],
+  'every model reports its own share of the ceiling',
+)
+assert.deepEqual(
+  card.filter(node => node.type === 'span' && node.props.className === 'taPoolQueued').map(node => node.props.children),
+  ['+2'],
+  'a queued model shows its queue beside the reading',
+)
+const segments = card.filter(node => node.type === 'i' && node.props.className === 'taSeg')
+assert.equal(segments.length, 8, 'one segment per admission slot across all models')
+assert.equal(
+  segments.filter(node => node.props['data-on'] === 'true').length,
+  4,
+  'the filled segments are exactly the requests in flight',
 )
 assert.ok(
-  card.some(node => node.type === 'span' && node.props.className === 'taPool' && node.props['data-tone'] === 'warn'),
+  card.some(node => node.type === 'span' && node.props.className === 'taPoolCount' && node.props['data-tone'] === 'warn'),
   'a model at its ceiling is marked',
 )
 assert.match(stylesheet, /--dsw-specific-menu/u, 'the popover uses the shell\u2019s menu surface')
-assert.match(stylesheet, /grid-template-columns:\s*minmax\(76px,\s*auto\)\s*minmax\(0,\s*1fr\)/u, 'and the shell\u2019s definition-list grid')
+assert.match(stylesheet, /--ta-accent/u, 'and draws its accent from a theme-aware token')
 
 // The transport and concurrency facts are part of the page: where requests go,
 // what the local endpoint is, and how many requests are running or waiting.

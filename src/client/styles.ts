@@ -27,15 +27,21 @@ export const css = {
   statusCard: 'taStatusCard',
   cardHead: 'taCardHead',
   cardTitle: 'taCardTitle',
-  cardHeadValue: 'taCardHeadValue',
+  cardGrow: 'taCardGrow',
+  cardState: 'taCardState',
+  cardBody: 'taCardBody',
+  cardHero: 'taCardHero',
+  cardFacts: 'taCardFacts',
+  cardLife: 'taCardLife',
   cardRule: 'taCardRule',
-  cardRows: 'taCardRows',
-  cardRow: 'taCardRow',
-  cardLabel: 'taCardLabel',
-  cardValue: 'taCardValue',
+  cardPools: 'taCardPools',
+  poolLabel: 'taPoolLabel',
   pool: 'taPool',
   poolName: 'taPoolName',
   poolCount: 'taPoolCount',
+  poolQueued: 'taPoolQueued',
+  segs: 'taSegs',
+  seg: 'taSeg',
   hidden: 'taHidden',
 
   notice: 'taNotice',
@@ -104,6 +110,10 @@ const STYLESHEET = `
   --ta-ok: var(--dsw-alias-state-success-label, var(--dsw-alias-state-success-primary, #16814a));
   --ta-warn: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary, #a5630a));
   --ta-error: var(--dsw-alias-label-error, #b72c39);
+  /* The school's violet, pulled toward the current ink so the accent stays
+     legible on the light surface and on the dark one alike. */
+  --ta-accent: color-mix(in srgb, #7c5cd6 58%, var(--ta-ink));
+  --ta-accent-soft: color-mix(in srgb, var(--ta-accent) 68%, var(--ta-ink));
   --ta-radius: 16px;
   --ta-panel-radius: 12px;
   --ta-control-radius: 8px;
@@ -192,10 +202,11 @@ const STYLESHEET = `
  *
  * The composer dock already holds three cards (activity, token usage, context
  * usage) drawn by the shell's stat-dialog panel: menu surface, large radius,
- * 16px padding, 12/18 type, a ruled title and a four-row definition list. A
- * fourth card with its own surface, border, padding and row rhythm reads as a
- * different product sitting in the same row, which is exactly what a user
- * notices. Every value below therefore mirrors that panel.
+ * 16px padding, 12/18 type. A fourth card with its own surface, border, padding
+ * and rhythm reads as a different product sitting in the same row, so the panel
+ * below mirrors that one exactly. Inside it, the hierarchy is this plugin's own:
+ * one large figure for the thing the card exists to report, two quiet facts
+ * beside it, and one admission strip at the bottom.
  */
 .taStatusCard {
   position: fixed;
@@ -223,52 +234,98 @@ const STYLESHEET = `
 }
 .taStatusCard:not(:popover-open) { display: none; }
 
-/* Title row: icon + name on the left, the live reading on the right. */
+/* Title row: mark, product name, and the token state with its dot. */
 .taCardHead {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 8px;
+  gap: 6px;
   color: var(--ta-ink);
   font-weight: 500;
 }
 .taCardTitle { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.taCardHead .taMark { width: 14px; height: 14px; }
-.taCardHeadValue { color: var(--ta-ink); font-variant-numeric: tabular-nums; }
-.taCardRule { border-top: .5px solid var(--ta-line); margin-bottom: 10px; }
-
-/* Four label/value rows, laid out exactly like the shell's definition list. */
-.taCardRows {
-  display: grid;
-  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
-  gap: 6px 16px;
-  margin: 0;
-}
-.taCardRow { display: contents; }
-.taCardLabel { min-width: 0; margin: 0; color: var(--ta-subtle); }
-.taCardValue {
-  display: flex;
-  flex-wrap: wrap;
+.taCardGrow { flex: 1 1 auto; }
+.taCardHead .taMark { width: 14px; height: 14px; color: var(--ta-accent); }
+.taCardState {
+  display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 2px 10px;
-  min-width: 0;
-  margin: 0;
-  color: var(--ta-muted);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ta-ok);
 }
-/* A healthy value stays neutral, like the shell's; only trouble gets colour. */
-.taCardValue[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 76%, var(--ta-ink)); }
-.taCardValue[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 76%, var(--ta-ink)); }
+.taCardState i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 16%, transparent);
+}
+.taCardState[data-tone="warn"] { color: var(--ta-warn); }
+.taCardState[data-tone="error"] { color: var(--ta-error); }
+.taCardState[data-tone="idle"] { color: var(--ta-subtle); }
 
-/* One model's live share of the gateway's per-model ceiling. */
-.taPool { display: inline-flex; align-items: baseline; gap: 4px; }
-.taPoolName { color: var(--ta-subtle); }
-.taPoolCount { font-variant-numeric: tabular-nums; }
-.taPool[data-tone="warn"] .taPoolCount { color: color-mix(in srgb, var(--ta-warn) 82%, var(--ta-ink)); }
-.taPool[data-tone="error"] .taPoolCount { color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); }
+/* Hero: the remaining lifetime is what this card exists to report, so it owns
+   the one large figure; the two facts sit beside it, right-aligned. */
+.taCardBody { display: flex; align-items: flex-end; gap: 16px; margin-top: 5px; }
+.taCardHero { flex: none; }
+.taCardHero b {
+  display: block;
+  font-size: 22px;
+  line-height: 25px;
+  font-weight: 500;
+  letter-spacing: -.01em;
+  color: var(--ta-ink);
+  font-variant-numeric: tabular-nums;
+}
+.taCardHero span { display: block; margin-top: 1px; font-size: 11px; line-height: 14px; color: var(--ta-subtle); }
+.taCardFacts { margin: 0 0 0 auto; padding: 0; display: grid; gap: 2px; }
+.taCardFacts div { display: flex; justify-content: flex-end; align-items: baseline; gap: 6px; }
+.taCardFacts dt { margin: 0; color: var(--ta-subtle); font-size: 11px; font-weight: 400; }
+.taCardFacts dd { margin: 0; color: var(--ta-ink); font-variant-numeric: tabular-nums; }
+.taCardFacts dd[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 78%, var(--ta-ink)); }
+.taCardFacts dd[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 78%, var(--ta-ink)); }
+
+/* Lifetime meter, tinted by the same tone the state reports. */
+.taCardLife {
+  margin-top: 9px;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--ta-ink) 10%, transparent);
+  overflow: hidden;
+}
+.taCardLife > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--ta-accent-soft), var(--ta-accent));
+  transition: width .3s ease;
+}
+.taCardLife[data-tone="warn"] > i {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--ta-warn) 60%, var(--ta-ink)), var(--ta-warn));
+}
+.taCardLife[data-tone="error"] > i { background: var(--ta-error); }
+.taCardRule { border-top: .5px solid var(--ta-line); margin: 12px 0 10px; }
+
+/* Admission strip: one group per model, one segment per slot that model is
+   allowed, filled up to the requests in flight. */
+.taCardPools { display: flex; align-items: center; gap: 13px; flex-wrap: wrap; }
+.taPoolLabel { color: var(--ta-subtle); font-size: 11px; }
+.taPool { display: inline-flex; align-items: center; gap: 5px; }
+.taPoolName { color: var(--ta-subtle); font-size: 11px; }
+.taPoolCount { color: var(--ta-ink); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.taPoolCount[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 82%, var(--ta-ink)); }
+.taPoolCount[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); }
+.taPoolQueued { color: var(--ta-warn); font-size: 11px; font-variant-numeric: tabular-nums; }
+.taSegs { display: inline-flex; gap: 2px; }
+.taSeg { width: 5px; height: 12px; border-radius: 1.5px; background: color-mix(in srgb, var(--ta-ink) 12%, transparent); }
+.taSeg[data-on] { background: var(--ta-accent); }
+.taSeg[data-on][data-tone="warn"] { background: var(--ta-warn); }
+.taSeg[data-on][data-tone="error"] { background: var(--ta-error); }
+
+@media (prefers-reduced-motion: reduce) {
+  .taCardLife > i { transition: none; }
+}
 
 .taHidden {
   position: absolute;
