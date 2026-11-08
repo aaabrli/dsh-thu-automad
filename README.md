@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.2.0-3B82F6?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-3B82F6?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2EA043?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/DSH-Web%20%7C%20Desktop-8A2BE2?style=flat-square">
   <img alt="Tsinghua MadModel" src="https://img.shields.io/badge/%E6%B8%85%E5%8D%8E-MadModel-660874?style=flat-square">
