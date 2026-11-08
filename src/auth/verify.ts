@@ -195,6 +195,34 @@ function probeMediaType(header: string | null): string {
   }
 }
 
+/** How many extra probes a busy gateway earns before its verdict stands. */
+const BUSY_RETRIES = 2
+
+/** Wait before the second busy probe; doubled for the one after it. */
+const BUSY_DELAY_MS = 800
+
+/**
+ * Ask the upstream whether it accepts a token, giving a busy gateway another try.
+ *
+ * A 429 is the gateway queueing, not a verdict on the credential: it counts
+ * in-flight completions per account and turns the extras away. Treating the
+ * first one as "this token is unproven" makes a renewal fail — and re-login —
+ * exactly when the account is busiest, which is the opposite of what the queue
+ * in the transport already does with a 429 it meets directly.
+ * @param options - token, model, transport choice, and timeout.
+ * @returns the last classification, which is a verdict rather than a queue state.
+ */
+export async function probeUpstreamWithRetry(options: ProbeOptions): Promise<ProbeResult> {
+  let result = await probeUpstream(options)
+  for (let attempt = 1; attempt <= BUSY_RETRIES && result.verdict === 'rate-limited'; attempt += 1) {
+    await new Promise((resolve) => {
+      setTimeout(resolve, BUSY_DELAY_MS * attempt)
+    })
+    result = await probeUpstream(options)
+  }
+  return result
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null
 }

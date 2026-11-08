@@ -20,7 +20,7 @@ import {
   CHECK_URL, FORM_URL, TICKET_CONSUMER, loadAuth,
 } from './chain.ts'
 import type { TwoFactorHandler, VendoredCookieJar } from './chain.ts'
-import { probeUpstream } from './verify.ts'
+import { probeUpstreamWithRetry } from './verify.ts'
 import type { ProbeResult } from './verify.ts'
 
 /** Longest hop chain followed while hunting a ticket. */
@@ -141,7 +141,7 @@ export async function login(request: LoginRequest): Promise<LoginOutcome> {
   }
 
   if (request.verify !== undefined) {
-    outcome.probe = await probeUpstream({
+    outcome.probe = await probeUpstreamWithRetry({
       token,
       model: request.verify.model,
       cookie: outcome.cookie,
@@ -168,7 +168,12 @@ export async function login(request: LoginRequest): Promise<LoginOutcome> {
 export async function loginViaWebVpn(request: LoginRequest): Promise<LoginOutcome> {
   const auth = loadAuth()
   const started = Date.now()
-  const result = await auth.getMadModelToken({
+  // The chain hangs off a client that owns the cookie jar the tunnel session
+  // lives in; the vendored entry exports the class, not a module-level
+  // `getMadModelToken`. Spelling it as a module call throws before the first
+  // request, which is exactly how this path was dead on arrival.
+  const client = new auth.MadmodelAuthClient(new auth.CookieJar())
+  const result = await client.getMadModelToken({
     username: request.username,
     password: request.password,
     fingerPrint: request.fingerprint,
@@ -184,7 +189,7 @@ export async function loginViaWebVpn(request: LoginRequest): Promise<LoginOutcom
   if (request.verify !== undefined) {
     // The token is only useful with the tunnel that issued it, so the probe
     // always follows the tunnel even when the caller asked for direct.
-    outcome.probe = await probeUpstream({
+    outcome.probe = await probeUpstreamWithRetry({
       token: outcome.token,
       model: request.verify.model,
       cookie: outcome.cookie,

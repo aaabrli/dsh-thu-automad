@@ -161,6 +161,19 @@ export interface VendoredAuthClient {
     handler?: TwoFactorHandler,
     existingFormPage?: unknown,
   ): Promise<IdentityResult>
+  /**
+   * Run the whole WebVPN chain on this client: unified-auth login, WebVPN
+   * session, info-portal roaming, ticket redemption on the tunneled path.
+   *
+   * This is a *client* method, not a module function: the vendored entry exports
+   * the class and this chain hangs off an instance that owns the cookie jar the
+   * tunnel session lives in. Calling it as `auth.getMadModelToken(...)` throws
+   * before the first request, which is how the off-campus path can be dead on
+   * arrival while every offline check still passes.
+   * @param credentials - identity, fingerprint, and two-factor answerer.
+   * @returns the token and the tunnel cookie it must be used with.
+   */
+  getMadModelToken(credentials: WebVpnCredentials): Promise<WebVpnToken>
 }
 
 /** The vendored module's exports this package uses. */
@@ -190,13 +203,6 @@ export interface VendoredAuth {
    * @returns the classification.
    */
   probeWebvpnSession(url: string, cookie: string): Promise<'ok' | 'invalid' | 'network'>
-  /**
-   * Run the whole WebVPN chain: unified-auth login, WebVPN session, info-portal
-   * roaming, ticket redemption on the tunneled madmodel path.
-   * @param credentials - identity, fingerprint, and two-factor answerer.
-   * @returns the token and the tunnel cookie it must be used with.
-   */
-  getMadModelToken(credentials: WebVpnCredentials): Promise<WebVpnToken>
 }
 
 /** Candidate locations of the vendored entry, relative to this module. */

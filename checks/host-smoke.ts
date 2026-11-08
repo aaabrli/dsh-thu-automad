@@ -418,45 +418,76 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   assert.equal(offline.verdict, 'network', 'a transport failure is never a claim about the credential')
 }
 
-// A failed post-login probe preserves the token and cookie as a pair. A valid
-// streaming choice allows rotation without waiting for the stream to close.
+// The off-campus chain exists as a *client* method in the vendored entry, not as
+// a module function. A module-shaped call throws before the first request — and
+// every other case here patches the chain, so they would happily patch a
+// function production never reaches.
+{
+  const auth = loadAuth()
+  const client = new auth.MadmodelAuthClient(new auth.CookieJar())
+  assert.equal(typeof client.getMadModelToken, 'function', 'the WebVPN chain hangs off the vendored client')
+}
+
+// A gateway that answers "wait" is not a verdict on the token: the probe gives
+// it two more tries and then keeps the renewal, because discarding a token the
+// school just minted would send the next tick through another login while the
+// account is busiest. A connection failure is different and still preserves the
+// old pair. A valid streaming choice rotates without closing the stream.
 {
   const now = Date.now()
   const oldToken = token(now - HOUR, now + HOUR)
   const newToken = token(now, now + 3 * HOUR)
+  const newerToken = token(now, now + 4 * HOUR)
+  const finalToken = token(now, now + 5 * HOUR)
   const h = harness({ values: { TSINGHUA_API_KEY: oldToken, MADMODEL_USERNAME: 'fixture-id', MADMODEL_PASSWORD: 'fixture-password' } })
   const session = new SessionStore(h.ctx)
   const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true, mode: 'webvpn' } })))
   const auth = loadAuth()
-  const getMadModelToken = auth.getMadModelToken
+  const chain = auth.MadmodelAuthClient.prototype
+  const getMadModelToken = chain.getMadModelToken
   const originalFetch = globalThis.fetch
+  let expectedToken = newToken
+  let expectedCookie = 'sid=new'
+  let probes = 0
   let makeResponse = (): Response => new Response('busy', { status: 429 })
   try {
     await session.write({ fingerprint: 'a'.repeat(32), tunnelCookie: 'sid=old', tunnelCookieAt: now - HOUR })
     await renewer.refreshFacts()
-    auth.getMadModelToken = async () => ({ token: newToken, expiresAt: now + 3 * HOUR, cookie: 'sid=new' })
+    chain.getMadModelToken = async () => ({ token: newToken, expiresAt: now + 3 * HOUR, cookie: 'sid=new' })
     globalThis.fetch = async (url, init) => {
+      probes += 1
       assert.equal(url, `${auth.MADMODEL_VPN_PREFIX}/v1/chat/completions`)
-      assert.equal(new Headers(init?.headers).get('Cookie'), 'sid=new', 'the probe uses the candidate session')
-      assert.equal(new Headers(init?.headers).get('Authorization'), `Bearer ${newToken}`)
+      assert.equal(new Headers(init?.headers).get('Cookie'), expectedCookie, 'the probe uses the candidate session')
+      assert.equal(new Headers(init?.headers).get('Authorization'), `Bearer ${expectedToken}`)
       assert.equal(JSON.parse(String(init?.body)).stream, true, 'the probe exercises the same stream as a chat')
       return makeResponse()
     }
 
-    const limited = await renewer.ensureFresh('manual')
-    assert.equal(limited.renewed, false)
-    assert.equal(limited.code, 'PROBE_RATE_LIMITED')
-    assert.equal(limited.message, 'HTTP 429 · text/plain')
-    assert.equal(h.values.TSINGHUA_API_KEY, oldToken)
-    assert.equal(renewer.transportSnapshot().cookie, 'sid=old')
-    assert.equal((await session.read()).tunnelCookie, 'sid=old')
+    // Busy is not a credential verdict: the renewal stands, marked unverified.
+    const busy = await renewer.ensureFresh('manual')
+    assert.equal(busy.renewed, true, 'a rate-limiting gateway does not fail the renewal')
+    assert.equal(probes, 3, 'the busy gateway is asked again before its answer stands')
+    assert.match(String(busy.message), /rate-limiting/u, 'the result says the token was not verified first')
+    assert.equal(h.values.TSINGHUA_API_KEY, newToken)
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=new')
+    assert.equal((await session.read()).tunnelCookie, 'sid=new')
 
+    // A connection failure is not a queue signal: the candidate stays unproven.
+    expectedToken = newerToken
+    expectedCookie = 'sid=newer'
+    chain.getMadModelToken = async () => ({ token: newerToken, expiresAt: now + 4 * HOUR, cookie: 'sid=newer' })
     makeResponse = () => { throw new Error('private transport diagnostic') }
     const unreachable = await renewer.ensureFresh('manual')
+    assert.equal(unreachable.renewed, false)
     assert.equal(unreachable.code, 'PROBE_UNREACHABLE')
     assert.equal(unreachable.message, 'No response from the gateway')
-    assert.equal(h.values.TSINGHUA_API_KEY, oldToken, 'a connection failure cannot validate a candidate')
+    assert.equal(h.values.TSINGHUA_API_KEY, newToken, 'a connection failure cannot validate a candidate')
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=new')
 
+    // A valid streaming choice allows rotation without waiting for the close.
+    expectedToken = finalToken
+    expectedCookie = 'sid=final'
+    chain.getMadModelToken = async () => ({ token: finalToken, expiresAt: now + 5 * HOUR, cookie: 'sid=final' })
     const encoder = new TextEncoder()
     let cancelled = false
     let closeTimer: ReturnType<typeof setTimeout>
@@ -471,12 +502,12 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
     const rotated = await renewer.ensureFresh('manual')
     assert.equal(rotated.renewed, true)
     assert.ok(cancelled, 'the probe releases the stream after the first valid choice')
-    assert.equal(h.values.TSINGHUA_API_KEY, newToken)
-    assert.equal(renewer.transportSnapshot().cookie, 'sid=new')
-    assert.equal((await session.read()).lastExpiresAt, now + 3 * HOUR)
-    assert.equal((await session.read()).tunnelCookie, 'sid=new')
+    assert.equal(h.values.TSINGHUA_API_KEY, finalToken)
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=final')
+    assert.equal((await session.read()).lastExpiresAt, now + 5 * HOUR)
+    assert.equal((await session.read()).tunnelCookie, 'sid=final')
   } finally {
-    auth.getMadModelToken = getMadModelToken
+    chain.getMadModelToken = getMadModelToken
     globalThis.fetch = originalFetch
     renewer.stop()
     for (const dispose of h.disposers.reverse()) dispose()
@@ -497,13 +528,14 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   const session = new SessionStore(h.ctx)
   const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true, mode: 'webvpn' } })))
   const auth = loadAuth()
-  const getMadModelToken = auth.getMadModelToken
+  const chain = auth.MadmodelAuthClient.prototype
+  const getMadModelToken = chain.getMadModelToken
   const originalFetch = globalThis.fetch
   try {
     await session.write({ fingerprint: 'a'.repeat(32) })
     await renewer.refreshFacts()
     assert.equal(renewer.transportSnapshot().cookie, '', 'no tunnel session before the login')
-    auth.getMadModelToken = async () => ({ token: sameToken, expiresAt: now + 3 * HOUR, cookie: 'sid=webvpn' })
+    chain.getMadModelToken = async () => ({ token: sameToken, expiresAt: now + 3 * HOUR, cookie: 'sid=webvpn' })
     globalThis.fetch = async () => new Response(
       'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n',
       { headers: { 'content-type': 'text/event-stream; charset=utf-8' } },
@@ -516,7 +548,7 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
     assert.equal(renewer.transportSnapshot().cookie, 'sid=webvpn', 'the session outlives a no-progress renewal')
     assert.equal((await session.read()).tunnelCookie, 'sid=webvpn', 'and it is stored for the next process start')
   } finally {
-    auth.getMadModelToken = getMadModelToken
+    chain.getMadModelToken = getMadModelToken
     globalThis.fetch = originalFetch
     renewer.stop()
     for (const dispose of h.disposers.reverse()) dispose()
@@ -536,13 +568,14 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   // transport must be the one that probes rather than a pinned choice.
   const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true } })))
   const auth = loadAuth()
-  const getMadModelToken = auth.getMadModelToken
+  const chain = auth.MadmodelAuthClient.prototype
+  const getMadModelToken = chain.getMadModelToken
   const originalFetch = globalThis.fetch
   let directStatus = 200
   let tunnelStatus = 200
   let logins = 0
   try {
-    auth.getMadModelToken = async () => {
+    chain.getMadModelToken = async () => {
       logins += 1
       return { token: live, expiresAt: now + 20 * HOUR, cookie: 'sid=fresh' }
     }
@@ -592,7 +625,7 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
     assert.equal(logins, 2, 'exactly one login for the expired session')
     assert.equal(renewer.transportSnapshot().cookie, 'sid=fresh')
   } finally {
-    auth.getMadModelToken = getMadModelToken
+    chain.getMadModelToken = getMadModelToken
     globalThis.fetch = originalFetch
     renewer.stop()
     for (const dispose of h.disposers.reverse()) dispose()

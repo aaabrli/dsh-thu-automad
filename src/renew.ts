@@ -491,7 +491,13 @@ export class Renewer {
     // Leave the active token and its session in place until the candidate is
     // verified and has a later expiry.
     const probe = outcome.probe
-    if (probe !== undefined && probe.verdict !== 'ok') {
+    const busy = probe?.verdict === 'rate-limited'
+    // A gateway that answered "wait" made no statement about the token. Failing
+    // the renewal over it would discard a token the school just minted and send
+    // the next tick through another full login — while the account is busy,
+    // which is the worst moment to add logins. Every other non-ok verdict is a
+    // real answer about the candidate and still blocks it.
+    if (probe !== undefined && probe.verdict !== 'ok' && !busy) {
       return this.recordFailure(
         PROBE_FAILURE_CODES[probe.verdict], probe.detail ?? 'The new token could not be verified', false,
       )
@@ -544,6 +550,7 @@ export class Renewer {
     this.lastRenewedAt = Date.now()
     this.lastCode = null
     this.lastMessage = `renewed on ${reason}; the new token expires at ${new Date(outcome.expiresAt).toISOString()}`
+      + (busy ? ' (the gateway was rate-limiting, so it was not verified first)' : '')
     this.nextAttemptAt = outcome.expiresAt - this.options.renew.refreshAheadMs
     return { renewed: true, code: null, message: this.lastMessage }
   }
