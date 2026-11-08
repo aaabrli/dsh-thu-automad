@@ -528,10 +528,51 @@ resetHooks()
 const failed = textOf(flatten(render(section.component, sectionProps) as ElementDescriptor))
 assert.match(failed, /No student id or password is stored yet/u, 'a known code renders localized copy')
 assert.doesNotMatch(failed, /no student id or password is stored under/u, 'not the Host\u2019s raw diagnostic')
+
+// The status popover is the shell's stat card, not a plugin skin: the same
+// four-row definition list, the same panel surface, and one concurrency reading
+// per model so a single "3 running" total cannot hide which model is saturated.
+serve(status({
+  renew: renew({ phase: 'needs-human', lastAttemptAt: Date.now(), lastCode: 'NO_CREDENTIALS' }),
+  transport: {
+    enabled: true,
+    mode: 'auto',
+    effective: 'webvpn',
+    port: 43110,
+    listening: true,
+    lastError: null,
+    tunnelCookieAt: Date.now() - HOUR,
+    lastProbeAt: Date.now() - 60_000,
+    lastProbeVerdict: 'ok',
+    pools: [
+      { model: 'DeepSeek-V4.1-Flash', limit: 3, ceiling: 3, inFlight: 3, queued: 0, pausedUntil: null },
+      { model: 'qwen3.8-27b', limit: 4, ceiling: 4, inFlight: 1, queued: 0, pausedUntil: null },
+      { model: 'DeepSeek-R1-W8A8', limit: 1, ceiling: 1, inFlight: 0, queued: 2, pausedUntil: null },
+    ],
+    queueLimit: 32,
+  },
+}))
+await repoll()
 resetHooks()
-const card = flatten(render(dock.component, { ...baseProps, renderSlot: () => null }))
-const human = card.find(node => node.type === 'span' && node.props.className === 'taBadge' && node.props.children === t('settings.renew.needsHuman'))
+const card = flatten(render(dock.component, { ...baseProps, renderSlot: () => null }) as ElementDescriptor)
+assert.deepEqual(
+  card.filter(node => node.type === 'dt').map(node => node.props.children),
+  [t('settings.overview.token'), t('settings.overview.network'), t('settings.overview.renew'), t('settings.section.queue')],
+  'the card carries the shell\u2019s four definition rows',
+)
+const human = card.find(node => node.type === 'dd' && node.props.children === t('settings.renew.needsHuman'))
 assert.equal(human?.props['data-tone'], 'error', 'the status card shows the needs-human renewal state')
+assert.deepEqual(
+  card.filter(node => node.type === 'span' && node.props.className === 'taPoolCount').map(node => node.props.children),
+  ['3/3', '1/4', '0/1', '+2'],
+  'every model reports its own share of the eight admission slots',
+)
+assert.ok(
+  card.some(node => node.type === 'span' && node.props.className === 'taPool' && node.props['data-tone'] === 'warn'),
+  'a model at its ceiling is marked',
+)
+assert.match(stylesheet, /--dsw-specific-menu/u, 'the popover uses the shell\u2019s menu surface')
+assert.match(stylesheet, /grid-template-columns:\s*minmax\(76px,\s*auto\)\s*minmax\(0,\s*1fr\)/u, 'and the shell\u2019s definition-list grid')
 
 // The transport and concurrency facts are part of the page: where requests go,
 // what the local endpoint is, and how many requests are running or waiting.

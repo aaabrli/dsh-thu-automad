@@ -27,11 +27,15 @@ export const css = {
   statusCard: 'taStatusCard',
   cardHead: 'taCardHead',
   cardTitle: 'taCardTitle',
-  cardToken: 'taCardToken',
+  cardHeadValue: 'taCardHeadValue',
+  cardRule: 'taCardRule',
   cardRows: 'taCardRows',
   cardRow: 'taCardRow',
   cardLabel: 'taCardLabel',
   cardValue: 'taCardValue',
+  pool: 'taPool',
+  poolName: 'taPoolName',
+  poolCount: 'taPoolCount',
   hidden: 'taHidden',
 
   notice: 'taNotice',
@@ -110,14 +114,14 @@ const STYLESHEET = `
 :is(.taBadge, .taReading, .taMeter, .taNotice)[data-tone="warn"] { --ta-tone: var(--ta-warn); }
 :is(.taBadge, .taReading, .taMeter, .taNotice)[data-tone="error"] { --ta-tone: var(--ta-error); }
 
-.taGroup, .taStatusCard, .taNotice, .taFactorModal {
+.taGroup, .taNotice, .taFactorModal {
   box-sizing: border-box;
   border: 1px solid var(--ta-line);
   border-radius: var(--ta-radius);
   background: var(--ta-surface);
   color: var(--ta-ink);
 }
-.taCardToken, .taIdentityEditor, .taFactor {
+.taIdentityEditor, .taFactor {
   box-sizing: border-box;
   border: 1px solid var(--ta-line);
   border-radius: var(--ta-panel-radius);
@@ -169,7 +173,7 @@ const STYLESHEET = `
   max-width: 100%;
   padding: 1px 8px;
   border: 0;
-  border-radius: var(--ta-control-radius);
+  border-radius: var(--dsw-radius-sm, var(--ta-control-radius));
   background: transparent;
   color: var(--ta-subtle);
   font: inherit;
@@ -180,45 +184,91 @@ const STYLESHEET = `
   white-space: nowrap;
 }
 
-.taLink:hover, .taLink[aria-expanded="true"] { background: var(--ta-hover); color: var(--ta-ink); }
+.taLink:hover, .taLink[aria-expanded="true"] { background: var(--ta-hover); color: var(--ta-muted); }
 .taLink:focus-visible { outline: 2px solid var(--ta-focus); outline-offset: 2px; }
 
+/*
+ * The popover is the shell's own stat card, not a plugin skin.
+ *
+ * The composer dock already holds three cards (activity, token usage, context
+ * usage) drawn by the shell's stat-dialog panel: menu surface, large radius,
+ * 16px padding, 12/18 type, a ruled title and a four-row definition list. A
+ * fourth card with its own surface, border, padding and row rhythm reads as a
+ * different product sitting in the same row, which is exactly what a user
+ * notices. Every value below therefore mirrors that panel.
+ */
 .taStatusCard {
   position: fixed;
   inset: auto;
   margin: 0;
-  width: min(324px, calc(100vw - 16px));
-  max-height: min(62dvh, 380px);
-  overflow: auto;
-  padding: 12px;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: min(300px, calc(100vw - 24px));
+  max-width: min(440px, calc(100vw - 24px));
+  max-height: min(62dvh, 420px);
+  overflow: hidden auto;
+  padding: 16px;
+  border: 0;
+  border-radius: var(--dsw-radius-lg, 12px);
+  background: var(--dsw-specific-menu, var(--ta-surface));
+  backdrop-filter: var(--dsw-menu-backdrop-filter, none);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1, var(--ta-line));
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2, var(--ta-line));
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2, var(--ta-muted));
   box-shadow: var(--dsw-elevation-prominent, 0 12px 32px rgb(0 0 0 / 25%));
+  color: var(--ta-muted);
   font-size: 12px;
   line-height: 18px;
   z-index: 1200;
 }
 .taStatusCard:not(:popover-open) { display: none; }
+
+/* Title row: icon + name on the left, the live reading on the right. */
 .taCardHead {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+  color: var(--ta-ink);
+  font-weight: 500;
 }
-.taCardTitle { min-width: 0; font-size: 14px; font-weight: 600; }
-.taCardToken { display: grid; gap: 8px; padding: 9px 10px; }
-.taCardToken .taCardRow { padding: 0; }
-.taCardRows { margin-top: 6px; }
-.taCardRow {
+.taCardTitle { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.taCardHead .taMark { width: 14px; height: 14px; }
+.taCardHeadValue { color: var(--ta-ink); font-variant-numeric: tabular-nums; }
+.taCardRule { border-top: .5px solid var(--ta-line); margin-bottom: 10px; }
+
+/* Four label/value rows, laid out exactly like the shell's definition list. */
+.taCardRows {
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 0;
+}
+.taCardRow { display: contents; }
+.taCardLabel { min-width: 0; margin: 0; color: var(--ta-subtle); }
+.taCardValue {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 4px 10px;
-  padding: 6px 0;
+  justify-content: flex-end;
+  gap: 2px 10px;
+  min-width: 0;
+  margin: 0;
+  color: var(--ta-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
-.taCardRows .taCardRow + .taCardRow { border-top: 1px solid var(--ta-line); }
-.taCardRows .taCardRow:last-child { padding-bottom: 0; }
-.taCardLabel { flex: 1 1 70px; color: var(--ta-muted); }
-.taCardValue { display: flex; align-items: center; justify-content: flex-end; gap: 4px 6px; flex-wrap: wrap; margin-inline-start: auto; min-width: 0; max-width: 100%; }
+/* A healthy value stays neutral, like the shell's; only trouble gets colour. */
+.taCardValue[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 76%, var(--ta-ink)); }
+.taCardValue[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 76%, var(--ta-ink)); }
+
+/* One model's live share of the gateway's per-model ceiling. */
+.taPool { display: inline-flex; align-items: baseline; gap: 4px; }
+.taPoolName { color: var(--ta-subtle); }
+.taPoolCount { font-variant-numeric: tabular-nums; }
+.taPool[data-tone="warn"] .taPoolCount { color: color-mix(in srgb, var(--ta-warn) 82%, var(--ta-ink)); }
+.taPool[data-tone="error"] .taPoolCount { color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); }
 
 .taHidden {
   position: absolute;

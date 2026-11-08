@@ -11,13 +11,15 @@ import type { ReactNode } from 'react'
 import type {
   InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, TranslateNS,
 } from '@deepseek-ai/dsh-client-ui-slots'
-import type { AutomadStatus } from '../protocol.ts'
+import type { TransportStatus } from '../protocol.ts'
 import type { ReadingInjected } from './Reading.tsx'
+import { modelLabel } from './format.ts'
 import { NS } from './locale.ts'
 import { STATUS_PILL_READING } from './slots.ts'
 import { css } from './styles.ts'
 import { useCountdown } from './use-countdown.ts'
-import { Badge, BrandMark, LifetimeMeter, networkReading, renewalReading, tokenReading } from './visuals.tsx'
+import { BrandMark, networkReading, renewalReading, tokenReading } from './visuals.tsx'
+import type { Tone } from './visuals.tsx'
 
 /** Full props of the composer dock occupant. */
 export type StatusLinkProps =
@@ -103,26 +105,28 @@ export const StatusLink = memo(function StatusLink({
         aria-label={t('settings.title')}
       >
         <div className={css.cardHead}>
-          <BrandMark />
-          <span className={css.cardTitle}>{t('settings.title')}</span>
+          <span className={css.cardTitle}>
+            <BrandMark small />
+            <span>{t('settings.title')}</span>
+          </span>
+          {remaining === null ? null : <span className={css.cardHeadValue}>{remaining}</span>}
         </div>
+        <div className={css.cardRule} aria-hidden="true" />
         {status === null ? (
           <p className={css.note}>{t(unreachable ? 'pill.unavailable' : 'link.loading')}</p>
         ) : (
-          <>
-            <div className={css.cardToken}>
-              <CardRow label={t('settings.overview.token')}>
-                {remaining === null ? null : <span className={css.note}>{t('settings.overview.remaining', { remaining })}</span>}
-                <Badge {...tokenReading(status.token.state, t)} />
-              </CardRow>
-              <LifetimeMeter token={status.token} />
-            </div>
-            <div className={css.cardRows}>
-              <CardRow label={t('settings.overview.network')}><Badge {...networkReading(status.transport, t)} /></CardRow>
-              <CardRow label={t('settings.overview.renew')}><Badge {...renewalReading(status.renew, t)} /></CardRow>
-              <CardRow label={t('settings.section.queue')}>{queueSummary(status, t)}</CardRow>
-            </div>
-          </>
+          <dl className={css.cardRows}>
+            <CardRow label={t('settings.overview.token')} tone={tokenReading(status.token.state, t).tone}>
+              {tokenReading(status.token.state, t).text}
+            </CardRow>
+            <CardRow label={t('settings.overview.network')} tone={networkReading(status.transport, t).tone}>
+              {networkReading(status.transport, t).text}
+            </CardRow>
+            <CardRow label={t('settings.overview.renew')} tone={renewalReading(status.renew, t).tone}>
+              {renewalReading(status.renew, t).text}
+            </CardRow>
+            <CardRow label={t('settings.section.queue')}>{poolReadings(status.transport, t)}</CardRow>
+          </dl>
         )}
       </div>
     </span>
@@ -140,26 +144,47 @@ function positionCard(card: HTMLElement, button: HTMLElement): void {
   card.style.left = `${String(Math.max(margin, Math.min(anchor.left, window.innerWidth - width - margin)))}px`
 }
 
-function CardRow({ label, children }: { label: string; children: ReactNode }) {
+/** One definition-list row: term on the left, reading on the right. */
+function CardRow({ label, tone = 'idle', children }: { label: string; tone?: Tone; children: ReactNode }) {
   return (
     <div className={css.cardRow}>
-      <span className={css.cardLabel}>{label}</span>
-      <div className={css.cardValue}>{children}</div>
+      <dt className={css.cardLabel}>{label}</dt>
+      <dd className={css.cardValue} data-tone={tone}>{children}</dd>
     </div>
   )
 }
 
-/** One compact line for the three per-model pools. */
-function queueSummary(status: AutomadStatus, t: TranslateNS<typeof NS>): ReactNode {
-  const pools = status.transport?.pools ?? []
+/**
+ * One reading per model: live completions against the gateway's own ceiling.
+ *
+ * The ceilings are per model (3 + 4 + 1 = 8 slots on the shipped configuration),
+ * so a single "3 running" total hides which model is actually saturated. Each
+ * group shows in-flight against that ceiling and appends the queue when one
+ * exists; the full model id and the queue travel in the title.
+ * @param transport - transport facts, absent while the loopback is starting.
+ * @param t - locale seat.
+ * @returns one element per known model, or an em dash before pools exist.
+ */
+function poolReadings(transport: TransportStatus | undefined, t: TranslateNS<typeof NS>): ReactNode {
+  const pools = transport?.pools ?? []
   if (pools.length === 0) return '—'
-  const running = pools.reduce((sum, pool) => sum + pool.inFlight, 0)
-  const queued = pools.reduce((sum, pool) => sum + pool.queued, 0)
-  const paused = pools.some(pool => pool.pausedUntil !== null && pool.pausedUntil > Date.now())
-  return (
-    <Badge
-      tone={queued > 0 || paused ? 'warn' : 'idle'}
-      text={t('link.cardQueue', { running: String(running), queued: String(queued) })}
-    />
-  )
+  return pools.map((pool) => {
+    // `ceiling` is optional on the wire; the admission limit is the same number
+    // on a profile that never ramps, so an older Host still renders a reading.
+    const ceiling = pool.ceiling ?? pool.limit
+    const paused = pool.pausedUntil !== null && pool.pausedUntil > Date.now()
+    const full = ceiling > 0 && pool.inFlight >= ceiling
+    return (
+      <span
+        key={pool.model}
+        className={css.pool}
+        data-tone={paused ? 'error' : full ? 'warn' : 'idle'}
+        title={`${pool.model} · ${t('link.cardQueue', { running: String(pool.inFlight), queued: String(pool.queued) })}`}
+      >
+        <span className={css.poolName}>{modelLabel(pool.model)}</span>
+        <span className={css.poolCount}>{`${String(pool.inFlight)}/${String(ceiling)}`}</span>
+        {pool.queued > 0 ? <span className={css.poolCount}>{`+${String(pool.queued)}`}</span> : null}
+      </span>
+    )
+  })
 }

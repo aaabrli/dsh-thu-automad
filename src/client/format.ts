@@ -41,3 +41,28 @@ export function formatTime(at: number | null): string {
 export function formatDateTime(at: number): string {
   return new Intl.DateTimeFormat(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(at)
 }
+
+/** Familiar abbreviations for the models this plugin's provider row ships. */
+const MODEL_LABELS: Record<string, string> = {
+  'DeepSeek-V4.1-Flash': 'V4.1',
+  'qwen3.8-27b': 'Qwen',
+  'DeepSeek-R1-W8A8': 'R1',
+}
+
+/**
+ * Short model name for the status card's concurrency row.
+ *
+ * The row carries one reading per model, so the name has to stay short enough
+ * that three of them sit on one line while the full id stays available as the
+ * element's title. Known ids get their familiar abbreviation; anything else
+ * (a deployment that adds models) is shortened mechanically rather than
+ * guessed at.
+ * @param model - model id as the Host reports it.
+ * @returns the compact label.
+ */
+export function modelLabel(model: string): string {
+  const known = MODEL_LABELS[model]
+  if (known !== undefined) return known
+  const trimmed = model.replace(/^deepseek-/iu, '').replace(/-(?:w\d+a\d+|awq|gptq)$/iu, '')
+  return trimmed.length <= 10 ? trimmed : `${trimmed.slice(0, 9)}…`
+}
