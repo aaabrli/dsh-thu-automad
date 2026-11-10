@@ -19,6 +19,6 @@
 - 补查了 TypeScript：修正测试入口语法、空值判断、原生 Popover 接口、状态初始化、候选时间类型和取消检查。当前独立目录仍缺 DSH 宿主类型声明及相关开发依赖，完整类型检查尚未通过；相关诊断已归档。
 - 使用模拟认证、本机假网关和独立浏览器页面；遵照本次要求，没有真实校园账号续期、模型调用或正在运行的 DSH 重启。
 
-**清理与材料**：旧修复批次及本轮 5 个测试缓存目录已移入回收站，6 条回收站记录均已核对。关键材料保留在 `_wip/AUTO_20261110ReleaseReview/`：安装包 `dsh-thu-automad-0.3.1.tgz`、验证归档 `release-evidence.zip`、发布与清理记录 `release-result.json`。
+**清理与材料**：测试缓存、零散验证文件和本地重复安装包均已移入回收站，回收站记录已核对。本地只保留 `_wip/AUTO_20261110ReleaseReview/release-evidence.zip`，其中合并了行为与布局检查结果、包清单、发布确认和清理记录，归档完整性已复核。正式安装包保存在 [v0.3.1 Release](https://github.com/aaabrli/dsh-thu-automad/releases/tag/v0.3.1)。
 
 **版本与本机入口**：标签和 Release notes 对应 [CHANGELOG.md](CHANGELOG.md) 的同一段内容。源码及 `lib/index.js`、`lib/client.js` 一起交付。本机桌面 profile 通过 junction 指向此项目，完整退出并重启 DSH 后加载更新。学校后端恢复状态及真实会话恢复情况尚未验证。
