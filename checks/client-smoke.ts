@@ -361,10 +361,10 @@ assert.equal(section.id, 'thu-automad')
 assert.equal(section.locale, 'thu-automad')
 assert.equal(typeof section.component, 'function', 'the registrations carry components, not elements')
 
-const source = reading.face.hooks?.automadStatus as StatusSource | undefined
+const source = (reading.face.hooks as { automadStatus?: StatusSource } | undefined)?.automadStatus
 assert.ok(source !== undefined, 'the reading receives the status source through the hooks compartment')
 for (const slot of [...overlays, section]) {
-  assert.equal(slot.face.hooks?.automadStatus, source, 'every seat reads one source')
+  assert.equal((slot.face.hooks as { automadStatus?: StatusSource } | undefined)?.automadStatus, source, 'every seat reads one source')
   assert.equal(typeof slot.face.actions, 'object', 'every posting seat receives the action set')
   assert.equal(typeof slot.face.refresh, 'function', 'every posting seat can refresh the status')
 }
@@ -580,9 +580,13 @@ assert.deepEqual(
 )
 assert.deepEqual(
   card.filter(node => node.type === 'span' && node.props.className === 'taPoolQueued').map(node => node.props.children),
-  ['+2'],
-  'a queued model shows its queue beside the reading',
+  ['', '', '+2'],
+  'every row reserves its queue column',
 )
+const queuedIndex = card.findIndex(node => node.props.className === 'taPoolQueued' && node.props.children === '+2')
+const followingSlots = card.findIndex((node, index) => index > queuedIndex && node.props.className === 'taSegs')
+const followingCount = card.findIndex((node, index) => index > queuedIndex && node.props.className === 'taPoolCount')
+assert.ok(queuedIndex < followingSlots && followingSlots < followingCount, 'the queue is to the left of the slots and count')
 const segments = card.filter(node => node.type === 'i' && node.props.className === 'taSeg')
 assert.equal(segments.length, 8, 'one segment per admission slot across all models')
 assert.equal(
@@ -599,6 +603,52 @@ assert.match(String(paused?.props.children), /429/u, 'a paused model shows how l
 assert.match(String(human?.props.title), /student id/u, 'the renewal row explains the failure on hover')
 assert.match(stylesheet, /--dsw-specific-menu/u, 'the popover uses the shell\u2019s menu surface')
 assert.match(stylesheet, /--ta-accent/u, 'and draws its accent from a theme-aware token')
+
+// A service failure remains visible while the queue is empty; pending
+// verification has its own copy rather than reporting a failed password login.
+serve(status({
+  renew: renew({ lastCode: 'VERIFICATION_PENDING', lastMessage: 'HTTP 502 · application/json', lastAttemptAt: Date.now() }),
+  transport: {
+    enabled: true, mode: 'auto', effective: 'direct', port: 43110, listening: true,
+    lastError: null, tunnelCookieAt: null, lastProbeAt: null, lastProbeVerdict: null,
+    pools: [{ model: 'DeepSeek-V4.1-Flash', limit: 3, ceiling: 3, inFlight: 0, queued: 0, pausedUntil: null,
+      upstreamError: { status: 502, at: Date.now() } }],
+  },
+}))
+await repoll()
+resetHooks()
+const unavailableCard = flatten(render(dock.component, { ...baseProps, renderSlot: () => null }) as ElementDescriptor)
+assert.ok(unavailableCard.some(node => node.props.className === 'taPoolCount' && node.props['data-tone'] === 'error'))
+assert.match(String(unavailableCard.find(node => node.props.className === 'taPool')?.props.title), /502/u)
+resetHooks()
+const pendingPage = textOf(flatten(render(section.component, sectionProps) as ElementDescriptor))
+assert.match(pendingPage, /waiting for verification/u)
+assert.match(pendingPage, /Upstream service error \(HTTP 502\)/u)
+assert.doesNotMatch(pendingPage, /Last renewal failed/u)
+resetHooks()
+assert.match(textOf(flatten(render(reading.component, baseProps))), /upstream error/u)
+
+for (const tokenState of ['expired', 'rejected', 'missing'] as const) {
+  const failedStatus = status({
+    transport: {
+      enabled: true, mode: 'auto', effective: 'direct', port: 43110, listening: true,
+      lastError: null, tunnelCookieAt: null, lastProbeAt: null, lastProbeVerdict: null,
+      pools: [{ model: 'DeepSeek-V4.1-Flash', limit: 3, inFlight: 0, queued: 1, pausedUntil: null,
+        upstreamError: { status: 502, at: Date.now() } }],
+    },
+  }, { state: tokenState })
+  serve(failedStatus)
+  await repoll()
+  resetHooks()
+  const message = textOf(flatten(render(reading.component, baseProps)))
+  assert.match(message, new RegExp(tokenState === 'missing' ? 'not configured' : tokenState === 'rejected' ? 'refused' : 'expired', 'u'))
+  assert.doesNotMatch(message, /upstream error/u, 'actionable credential problems take priority')
+}
+
+serve(status({ renew: renew({ lastCode: 'VERIFICATION_PENDING' }) }))
+await repoll()
+resetHooks()
+assert.match(textOf(flatten(render(reading.component, baseProps))), /verification pending/u)
 
 // The transport and concurrency facts are part of the page: where requests go,
 // what the local endpoint is, and how many requests are running or waiting.

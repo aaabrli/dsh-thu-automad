@@ -201,6 +201,8 @@ export interface TransportPoolStatus {
   queued: number
   /** Epoch milliseconds the 429 pause ends, or null when not paused. */
   pausedUntil: number | null
+  /** Most recent upstream failure, cleared by a completed successful request. */
+  upstreamError?: { status: number | null; at: number } | null
 }
 
 /**
@@ -425,7 +427,18 @@ function isPoolList(value: unknown): boolean {
       && typeof pool.inFlight === 'number' && Number.isFinite(pool.inFlight)
       && typeof pool.queued === 'number' && Number.isFinite(pool.queued)
       && isOptionalNumber(pool.pausedUntil)
+      && (pool.upstreamError === undefined || isUpstreamError(pool.upstreamError))
   })
+}
+
+/** An upstream failure contains only a status code and the observation time. */
+function isUpstreamError(value: unknown): boolean {
+  if (value === null) return true
+  if (typeof value !== 'object') return false
+  const error = value as Record<string, unknown>
+  return typeof error.at === 'number' && Number.isFinite(error.at)
+    && (error.status === null || (typeof error.status === 'number'
+      && Number.isInteger(error.status) && error.status >= 500 && error.status <= 599))
 }
 
 /** Whether a decoded value is a policy status this browser half understands. */

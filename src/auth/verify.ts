@@ -94,6 +94,7 @@ export async function probeDirectSite(timeoutMs = 8_000): Promise<SiteReachabili
   }
   try { response.body?.cancel() } catch (_alreadyClosed) { /* nothing left to release */ }
   if (response.status >= 300 && response.status < 400) return 'offcampus'
+  if (response.status >= 500) return 'unknown'
   if (response.status >= 200) return 'campus'
   return 'unknown'
 }

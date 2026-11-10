@@ -25,6 +25,10 @@ export function renewFailureText(
 ): string | null {
   let reason: string
   switch (code) {
+    case 'CANCELLED': return t('settings.renew.result.cancelled')
+    case 'CANDIDATE_EXPIRED': return t('settings.renew.result.candidateExpired')
+    case 'INPUT_CHANGED': return t('settings.renew.result.inputsChanged')
+    case 'VERIFICATION_PENDING': reason = t('settings.renew.result.verificationPending'); break
     case 'NO_CREDENTIALS': return t('settings.renew.result.noCredentials')
     case 'NO_PROGRESS': return t('settings.renew.result.noProgress')
     case 'WRITE_REFUSED': return t('settings.renew.result.writeRefused')

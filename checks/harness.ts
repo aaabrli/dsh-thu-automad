@@ -30,7 +30,7 @@ export interface AskedQuestion {
 }
 
 /** What one call to `userQuestions.ask` should do. */
-export type QuestionAnswer = { selected: string[] } | Error
+export type QuestionAnswer = { selected: readonly string[] } | Error
 
 /** Options one harness is built with. */
 export interface HarnessOptions {

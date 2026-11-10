@@ -27,7 +27,7 @@ import { renewFailureText } from './renew-copy.ts'
 import { STATUS_PILL_READING } from './slots.ts'
 import { css } from './styles.ts'
 import { useCountdown } from './use-countdown.ts'
-import { BrandMark, networkReading, tokenReading } from './visuals.tsx'
+import { BrandMark, networkReading, poolFailureText, tokenReading } from './visuals.tsx'
 import type { Tone } from './visuals.tsx'
 
 /** Slots drawn as segments; above this a reading is numbers only. */
@@ -39,12 +39,6 @@ export type StatusLinkProps =
   & PropsRenderSlots<typeof STATUS_PILL_READING>
   & PropsLocale<typeof NS>
   & InjectFace<ReadingInjected>
-
-/** Minimal surface of the native popover API used here. */
-interface PopoverElement extends HTMLElement {
-  showPopover?: () => void
-  hidePopover?: () => void
-}
 
 /**
  * Composer dock pill opening a compact status card.
@@ -80,7 +74,7 @@ export const StatusLink = memo(function StatusLink({
   }, [])
 
   const toggle = (): void => {
-    const card = cardRef.current as PopoverElement | null
+    const card = cardRef.current
     const button = buttonRef.current
     if (card === null || button === null) return
     if (typeof card.showPopover !== 'function') return
@@ -205,6 +199,7 @@ function LifetimeBar({ token, tone }: { token: TokenStatus; tone: Tone }) {
  * the difference between routine and trouble.
  */
 function renewalFact(renew: RenewStatus, t: TranslateNS<typeof NS>): { text: string; tone: Tone } {
+  if (renew.lastCode === 'VERIFICATION_PENDING') return { text: t('settings.renew.verificationPending'), tone: 'warn' }
   switch (renew.phase) {
     case 'scheduled': return { text: formatTime(renew.nextAttemptAt), tone: 'idle' }
     case 'ok': return { text: formatTime(renew.lastAttemptAt), tone: 'idle' }
@@ -246,31 +241,36 @@ function PoolRow({ pool, t }: { pool: TransportPoolStatus; t: TranslateNS<typeof
   const ceiling = pool.ceiling ?? pool.limit
   const paused = pool.pausedUntil !== null && pool.pausedUntil > Date.now()
   const full = ceiling > 0 && pool.inFlight >= ceiling
-  const tone: Tone = paused ? 'error' : full ? 'warn' : 'idle'
+  const failure = poolFailureText(pool, t)
+  const tone: Tone = failure !== null || paused ? 'error' : full ? 'warn' : 'idle'
   const slots = ceiling > 0 && ceiling <= MAX_SEGMENTS
     ? Array.from({ length: ceiling }, (_unused, index) => index)
     : []
   const counts = t('link.cardQueue', { running: String(pool.inFlight), queued: String(pool.queued) })
+  const detail = [failure, paused && cooldown !== null ? t('settings.queue.cooldown', { remaining: cooldown }) : null, counts]
+    .filter(value => value !== null).join(' · ')
   return (
     <span
       className={css.pool}
-      title={paused && cooldown !== null ? `${t('settings.queue.cooldown', { remaining: cooldown })} · ${counts}` : counts}
+      title={detail}
     >
       <span className={css.poolName}>{pool.model}</span>
-      {slots.length === 0 ? null : (
-        <span className={css.segs} aria-hidden="true">
-          {slots.map(index => (
-            <i
-              key={index}
-              className={css.seg}
-              data-on={index < pool.inFlight ? 'true' : undefined}
-              data-tone={tone}
-            />
-          ))}
-        </span>
-      )}
-      <span className={css.poolCount} data-tone={tone}>{`${String(pool.inFlight)}/${String(ceiling)}`}</span>
-      {pool.queued > 0 ? <span className={css.poolQueued}>{`+${String(pool.queued)}`}</span> : null}
+      <span className={css.poolQueued}>{pool.queued > 0 ? `+${String(pool.queued)}` : ''}</span>
+      <span className={css.poolUsage}>
+        {slots.length === 0 ? null : (
+          <span className={css.segs} aria-hidden="true">
+            {slots.map(index => (
+              <i
+                key={index}
+                className={css.seg}
+                data-on={index < pool.inFlight ? 'true' : undefined}
+                data-tone={tone}
+              />
+            ))}
+          </span>
+        )}
+        <span className={css.poolCount} data-tone={tone}>{`${String(pool.inFlight)}/${String(ceiling)}`}</span>
+      </span>
       {paused && cooldown !== null
         ? <span className={css.poolPaused}>{t('settings.queue.cooldown', { remaining: cooldown })}</span>
         : null}

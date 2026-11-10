@@ -96,7 +96,15 @@ function presentationOf(
 ): Presentation {
   const { token, renew, transport } = status
   const label = token.label
+  switch (token.state) {
+    case 'expired': return { text: t('pill.expired', { label }), tone: 'error' }
+    case 'rejected': return { text: t('pill.rejected', { label }), tone: 'error' }
+    case 'missing': return { text: t('pill.missing', { label }), tone: 'idle' }
+  }
   const pools = transport?.pools ?? []
+  if (pools.some(pool => pool.upstreamError != null)) {
+    return { text: t('pill.upstreamError', { label }), tone: 'error' }
+  }
   const paused = pools.some(pool => pool.pausedUntil !== null && pool.pausedUntil > Date.now())
   if (paused) {
     return {
@@ -108,6 +116,9 @@ function presentationOf(
   if (queued > 0) {
     return { text: t('pill.queued', { label, count: String(queued) }), tone: 'warn' }
   }
+  if (renew.lastCode === 'VERIFICATION_PENDING') {
+    return { text: t('settings.renew.verificationPending'), tone: 'warn' }
+  }
   const withRemaining = { label, remaining: remaining ?? '' }
   if (renew.phase === 'running' && (token.state === 'ok' || token.state === 'expiring')) {
     return { text: t('pill.renewing', { label }), tone: 'warn' }
@@ -117,12 +128,6 @@ function presentationOf(
       return { text: t('pill.remaining', withRemaining), tone: 'ok' }
     case 'expiring':
       return { text: t('pill.remaining', withRemaining), tone: 'warn' }
-    case 'expired':
-      return { text: t('pill.expired', { label }), tone: 'error' }
-    case 'rejected':
-      return { text: t('pill.rejected', { label }), tone: 'error' }
-    case 'missing':
-      return { text: t('pill.missing', { label }), tone: 'idle' }
     case 'unknown':
       return { text: t('pill.unknown', { label }), tone: 'idle' }
   }

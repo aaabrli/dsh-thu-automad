@@ -23,12 +23,13 @@
  * @module dsh-thu-automad/renew
  */
 
+import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { authErrorCode, isIdentityCode, isTwoFactorCode, loadAuth } from './auth/chain.ts'
 import { login, loginViaWebVpn } from './auth/login.ts'
 import type { LoginOutcome } from './auth/login.ts'
-import { probeDirectSite } from './auth/verify.ts'
+import { probeDirectSite, probeUpstreamWithRetry } from './auth/verify.ts'
 import type { ProbeVerdict } from './auth/verify.ts'
 import { SessionStore } from './auth/session.ts'
 import type { SessionFacts } from './auth/session.ts'
@@ -64,12 +65,20 @@ export type RenewReason = 'schedule' | 'refusal' | 'manual'
 
 /** What one renewal attempt concluded. */
 export interface RenewOutcome {
-  /** Whether a new, verified token was written. */
+  /** Whether a replacement token was stored. */
   renewed: boolean
   /** Stable code describing the outcome, or null for a success. */
   code: string | null
   /** Credential-free description for the status page. */
   message: string | null
+}
+
+/** A private candidate awaiting a decisive gateway response; never published. */
+interface PendingVerification {
+  outcome: LoginOutcome
+  credentialHash: string
+  identityHash: string
+  challengeMark: number | null
 }
 
 /** Run and observe the credential renewal. */
@@ -85,6 +94,7 @@ export class Renewer {
   private inFlight: Promise<RenewOutcome> | undefined
   private stopped = false
   private lastRenewedAt: number | null = null
+  private pending: PendingVerification | undefined
   private facts: SessionFacts = {
     fingerprint: null, lastRenewAt: null, lastExpiresAt: null, twoFactorAt: null, unattendedRenewals: 0,
     tunnelCookie: null, tunnelCookieAt: null,
@@ -170,6 +180,10 @@ export class Renewer {
       this.nextAttemptAt = this.retryAt
       return
     }
+    if (this.pending !== undefined) {
+      await this.ensureFresh('schedule')
+      return
+    }
     const resolved = await this.ctx.credentials.resolve(this.options.credentialRef)
     if (resolved === undefined) {
       // Nothing to renew yet. Whether that is a problem is the settings page's
@@ -207,7 +221,12 @@ export class Renewer {
    * @returns what the attempt concluded.
    */
   async ensureFresh(reason: RenewReason, signal?: AbortSignal): Promise<RenewOutcome> {
+    if (this.isCancelled(signal)) return cancelledOutcome()
     if (this.inFlight !== undefined) return await this.inFlight
+    if (this.pending !== undefined && reason !== 'manual'
+      && this.retryAt !== null && Date.now() < this.retryAt) {
+      return { renewed: false, code: this.lastCode, message: this.lastMessage }
+    }
     // A renewal that just succeeded is the answer to the failure that asked for
     // it, so a second failure of the same request must not buy a second login.
     // The retry owner grants a bounded number of attempts, and without this each
@@ -239,9 +258,24 @@ export class Renewer {
     this.retryAt = null
   }
 
+  private isCancelled(signal?: AbortSignal): boolean {
+    return this.stopped || signal?.aborted === true
+  }
+
+  private cancelAttempt(): RenewOutcome {
+    this.pending = undefined
+    this.phase = 'idle'
+    this.lastCode = 'CANCELLED'
+    this.lastMessage = 'renewal cancelled before adopting the candidate'
+    this.retryAt = null
+    this.nextAttemptAt = null
+    return cancelledOutcome()
+  }
+
   /** Abandon any parked question and stop scheduling. */
   stop(): void {
     this.stopped = true
+    this.pending = undefined
     this.twoFactor.cancel()
   }
 
@@ -434,6 +468,7 @@ export class Renewer {
     const now = Date.now()
     this.lastAttemptAt = now
     this.phase = 'running'
+    this.noProgress = false
     this.nextAttemptAt = null
     this.lastCode = null
     this.lastMessage = null
@@ -441,6 +476,7 @@ export class Renewer {
     const username = await this.resolveText(this.options.auth.usernameRef)
     const password = await this.resolveText(this.options.auth.passwordRef)
     if (username === null || password === null) {
+      this.pending = undefined
       return this.recordFailure(
         'NO_CREDENTIALS',
         `no student id or password is stored under ${this.options.auth.usernameRef} / ${this.options.auth.passwordRef}`,
@@ -455,16 +491,46 @@ export class Renewer {
       return this.recordFailure('FINGERPRINT', describe(error), false)
     }
 
-    const previous = readTokenTimes(
-      (await this.ctx.credentials.resolve(this.options.credentialRef))?.value ?? '',
-    )?.expiresAt ?? null
-    const challengeMark = this.twoFactor.challengeMark()
-
+    const currentToken = (await this.ctx.credentials.resolve(this.options.credentialRef))?.value ?? ''
+    const previous = readTokenTimes(currentToken)?.expiresAt ?? null
+    const credentialHash = privateHash(currentToken)
+    const identityHash = privateHash(JSON.stringify([username, password]))
     const mode = await this.detectTransport(true)
+    const pending = this.pending
+    const reusable = pending !== undefined
+      && pending.credentialHash === credentialHash && pending.identityHash === identityHash
+      && pending.outcome.expiresAt > now
+      && (pending.outcome.ticketSource === 'webvpn') === (mode === 'webvpn')
+    if (!reusable) this.pending = undefined
+    // An external replacement owns the schedule. A stale candidate must never
+    // overwrite it or force an unnecessary background login.
+    if (pending !== undefined && !reusable && reason === 'schedule'
+      && previous !== null && previous - this.options.renew.refreshAheadMs > now) {
+      this.phase = 'scheduled'
+      this.retryAt = null
+      this.lastCode = null
+      this.lastMessage = null
+      this.nextAttemptAt = previous - this.options.renew.refreshAheadMs
+      return { renewed: false, code: null, message: null }
+    }
+    const challengeMark = reusable ? pending.challengeMark : this.twoFactor.challengeMark()
 
     let outcome: LoginOutcome
     try {
-      outcome = await this.loginWith(mode, username, password, fingerprint)
+      if (reusable) {
+        outcome = {
+          ...pending.outcome,
+          probe: await probeUpstreamWithRetry({
+            token: pending.outcome.token,
+            model: this.options.renew.verifyModel,
+            cookie: pending.outcome.cookie,
+            tunnelMode: mode === 'webvpn' || this.options.auth.tunnel,
+            tunnelPrefix: loadAuth().MADMODEL_VPN_PREFIX,
+          }),
+        }
+      } else {
+        outcome = await this.loginWith(mode, username, password, fingerprint)
+      }
     } catch (error) {
       // `auto` can lose a race with a network change: the probe said campus but
       // the gateway then answered with its unified-auth form. That is the one
@@ -488,19 +554,42 @@ export class Renewer {
       if (signal?.aborted === true) this.twoFactor.cancel()
     }
 
+    if (this.isCancelled(signal)) return this.cancelAttempt()
+
     // Leave the active token and its session in place until the candidate is
     // verified and has a later expiry.
     const probe = outcome.probe
     const busy = probe?.verdict === 'rate-limited'
+    if (probe?.verdict === 'unavailable' || probe?.verdict === 'network') {
+      this.pending = { outcome, credentialHash, identityHash, challengeMark }
+      const result = this.recordFailure('VERIFICATION_PENDING', probe.detail ?? 'Gateway verification is pending', false)
+      this.phase = 'scheduled'
+      return result
+    }
+    this.pending = undefined
     // A gateway that answered "wait" made no statement about the token. Failing
     // the renewal over it would discard a token the school just minted and send
     // the next tick through another full login — while the account is busy,
-    // which is the worst moment to add logins. Every other non-ok verdict is a
-    // real answer about the candidate and still blocks it.
+    // which is the worst moment to add logins. Service failures retain a private
+    // candidate above; decisive refusals still block its activation.
     if (probe !== undefined && probe.verdict !== 'ok' && !busy) {
       return this.recordFailure(
         PROBE_FAILURE_CODES[probe.verdict], probe.detail ?? 'The new token could not be verified', false,
       )
+    }
+
+    const [latestToken, latestUsername, latestPassword] = await Promise.all([
+      this.ctx.credentials.resolve(this.options.credentialRef),
+      this.resolveText(this.options.auth.usernameRef),
+      this.resolveText(this.options.auth.passwordRef),
+    ])
+    if (privateHash(latestToken?.value ?? '') !== credentialHash
+      || privateHash(JSON.stringify([latestUsername, latestPassword])) !== identityHash) {
+      return this.recordFailure('INPUT_CHANGED', 'stored credentials changed during verification; retry using the current settings', false)
+    }
+    if (this.isCancelled(signal)) return this.cancelAttempt()
+    if (outcome.expiresAt <= Date.now()) {
+      return this.recordFailure('CANDIDATE_EXPIRED', 'the candidate expired during verification; obtain a fresh token', false)
     }
 
     if (previous !== null && outcome.expiresAt <= previous + PROGRESS_MARGIN_MS) {
@@ -635,6 +724,15 @@ export class Renewer {
     const value = resolved.value.trim()
     return value === '' ? null : value
   }
+}
+
+/** Match private inputs across retries without retaining an extra plaintext copy. */
+function privateHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function cancelledOutcome(): RenewOutcome {
+  return { renewed: false, code: 'CANCELLED', message: 'renewal cancelled' }
 }
 
 /** Classify one thrown login failure into a reported code and whether a human is needed. */

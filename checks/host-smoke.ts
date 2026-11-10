@@ -16,7 +16,7 @@ import assert from 'node:assert/strict'
 import { apply, isAutomadStatus, resolveOptions } from '../src/index.ts'
 import { loadAuth, SITE } from '../src/auth/chain.ts'
 import { SessionStore } from '../src/auth/session.ts'
-import { probeUpstream } from '../src/auth/verify.ts'
+import { probeDirectSite, probeUpstream } from '../src/auth/verify.ts'
 import { RENEW_PATH, SETTINGS_PATH, STATUS_PATH, TWO_FACTOR_PATH } from '../src/protocol.ts'
 import { Renewer } from '../src/renew.ts'
 import { TwoFactorQueue } from '../src/two-factor.ts'
@@ -37,7 +37,7 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   transport: { enabled: false },
   rules: RULES,
   ...overrides,
-})
+});
 
 // ── the status document ────────────────────────────────────────────────────
 
@@ -57,8 +57,8 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   assert.equal((body.auth as { usernameConfigured: boolean }).usernameConfigured, true)
   assert.equal((body.auth as { passwordConfigured: boolean }).passwordConfigured, true)
   assert.equal((body.auth as { deviceName: string }).deviceName, 'dsh-madmodel', 'the device name the chain registers is reported')
-  assert.deepEqual((body.auth as { shadowedRefs: string[] }).shadowedRefs, [])
-  assert.deepEqual((body.policy as { rules: unknown[] }).rules.length, 1)
+  assert.deepEqual((body.auth as { shadowedRefs: readonly string[] }).shadowedRefs, [])
+  assert.deepEqual((body.policy as { rules: readonly unknown[] }).rules.length, 1)
   assert.equal((body.renew as { enabled: boolean }).enabled, true)
   assert.equal((body.twoFactor as unknown), null)
   assert.equal(h.routes.length, 6, 'every route is registered once Connection is present')
@@ -432,7 +432,8 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
 // it two more tries and then keeps the renewal, because discarding a token the
 // school just minted would send the next tick through another login while the
 // account is busiest. A connection failure is different and still preserves the
-// old pair. A valid streaming choice rotates without closing the stream.
+// old pair and retains its candidate for verification. A valid streaming choice
+// rotates without closing the stream.
 {
   const now = Date.now()
   const oldToken = token(now - HOUR, now + HOUR)
@@ -479,10 +480,32 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
     makeResponse = () => { throw new Error('private transport diagnostic') }
     const unreachable = await renewer.ensureFresh('manual')
     assert.equal(unreachable.renewed, false)
-    assert.equal(unreachable.code, 'PROBE_UNREACHABLE')
+    assert.equal(unreachable.code, 'VERIFICATION_PENDING')
     assert.equal(unreachable.message, 'No response from the gateway')
     assert.equal(h.values.TSINGHUA_API_KEY, newToken, 'a connection failure cannot validate a candidate')
     assert.equal(renewer.transportSnapshot().cookie, 'sid=new')
+
+    // The verification retries the candidate, not the school password login.
+    let repeatedLogins = 0
+    chain.getMadModelToken = async () => { repeatedLogins += 1; throw new Error('unexpected login') }
+    makeResponse = () => new Response('unavailable', { status: 502, headers: { 'content-type': 'application/json' } })
+    const deferred = await renewer.ensureFresh('manual')
+    assert.equal(deferred.code, 'VERIFICATION_PENDING')
+    assert.equal(repeatedLogins, 0)
+    assert.equal(renewer.snapshot().phase, 'scheduled')
+    assert.equal(h.values.TSINGHUA_API_KEY, newToken)
+    const attempts = probes
+    await renewer.ensureFresh('refusal')
+    await renewer.tick()
+    assert.equal(probes, attempts, 'background callers respect the verification backoff')
+    makeResponse = () => new Response('{"choices":[{"message":{"content":"ok"}}]}', {
+      headers: { 'content-type': 'application/json' },
+    })
+    const verified = await renewer.ensureFresh('manual')
+    assert.equal(verified.renewed, true)
+    assert.equal(repeatedLogins, 0, 'service recovery activates the retained candidate without another login')
+    assert.equal(h.values.TSINGHUA_API_KEY, newerToken)
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=newer')
 
     // A valid streaming choice allows rotation without waiting for the close.
     expectedToken = finalToken
@@ -512,6 +535,112 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
     renewer.stop()
     for (const dispose of h.disposers.reverse()) dispose()
   }
+}
+
+// A 5xx cannot decide the network location or activate an unverified token.
+// Identity/token changes, candidate expiry, and a decisive refusal must discard
+// a pending candidate rather than letting it overwrite newer private inputs.
+for (const change of ['scheduled', 'identity', 'token', 'expiry', 'rejected', 'concurrent-token', 'concurrent-identity', 'stopped', 'aborted', 'expires-during-probe'] as const) {
+  const now = Date.now()
+  const old = token(now - HOUR, now + 3 * HOUR)
+  const candidate = token(now, now + 4 * HOUR)
+  const fresh = token(now, now + 6 * HOUR)
+  const h = harness({ values: { TSINGHUA_API_KEY: old, MADMODEL_USERNAME: 'fixture-id', MADMODEL_PASSWORD: 'fixture-password' } })
+  const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true, mode: 'webvpn' } })))
+  const chain = loadAuth().MadmodelAuthClient.prototype
+  const originalLogin = chain.getMadModelToken
+  const originalFetch = globalThis.fetch
+  const originalNow = Date.now
+  let logins = 0
+  let probes = 0
+  let status = 503
+  const controller = new AbortController()
+  try {
+    chain.getMadModelToken = async () => {
+      logins += 1
+      return { token: logins === 1 ? candidate : fresh, expiresAt: now + (logins === 1 ? 4 : 6) * HOUR, cookie: `sid=${String(logins)}` }
+    }
+    globalThis.fetch = async () => {
+      probes += 1
+      if (status === 200 && change === 'concurrent-token') h.values.TSINGHUA_API_KEY = fresh
+      if (status === 200 && change === 'concurrent-identity') h.values.MADMODEL_PASSWORD = 'changed-during-probe'
+      if (status === 200 && change === 'stopped') renewer.stop()
+      if (status === 200 && change === 'aborted') controller.abort()
+      if (status === 200 && change === 'expires-during-probe') Date.now = () => now + 5 * HOUR
+      return new Response(status === 200 ? '{"choices":[{"message":{}}]}' : 'unavailable', {
+        status, headers: { 'content-type': 'application/json' },
+      })
+    }
+    const deferred = await renewer.ensureFresh('manual')
+    assert.equal(deferred.code, 'VERIFICATION_PENDING')
+    assert.equal(h.values.TSINGHUA_API_KEY, old)
+    assert.equal(renewer.transportSnapshot().cookie, '')
+    assert.ok(!JSON.stringify(renewer.snapshot()).includes(candidate), 'candidate secrets stay out of public status')
+    status = 200
+    if (change === 'scheduled') {
+      const retryTime = Number(renewer.snapshot().nextAttemptAt) + 1
+      Date.now = () => retryTime
+      await renewer.tick()
+      assert.equal(logins, 1, 'the scheduled retry validates without signing in again')
+      assert.equal(probes, 2)
+      assert.equal(h.values.TSINGHUA_API_KEY, candidate)
+    } else if (change === 'token') {
+      h.values.TSINGHUA_API_KEY = fresh
+      Date.now = () => now + 3 * MINUTE
+      await renewer.tick()
+      assert.equal(logins, 1)
+      assert.equal(probes, 1, 'an external replacement invalidates the candidate')
+      assert.equal(h.values.TSINGHUA_API_KEY, fresh)
+      assert.equal(renewer.snapshot().lastCode, null)
+    } else if (change === 'stopped' || change === 'aborted' || change === 'expires-during-probe') {
+      const result = await renewer.ensureFresh('manual', controller.signal)
+      assert.equal(result.code, change === 'expires-during-probe' ? 'CANDIDATE_EXPIRED' : 'CANCELLED')
+      assert.equal(h.values.TSINGHUA_API_KEY, old)
+      assert.equal(renewer.transportSnapshot().cookie, '')
+      assert.equal(logins, 1)
+      if (change !== 'expires-during-probe') {
+        const probeCount = probes
+        const cancelled = await renewer.ensureFresh('manual', controller.signal)
+        assert.equal(cancelled.code, 'CANCELLED')
+        assert.equal(probes, probeCount, 'a cancelled or stopped caller never starts another probe')
+      }
+    } else if (change === 'concurrent-token' || change === 'concurrent-identity') {
+      const result = await renewer.ensureFresh('manual')
+      assert.equal(result.code, 'INPUT_CHANGED')
+      assert.equal(logins, 1)
+      assert.equal(h.values.TSINGHUA_API_KEY, change === 'concurrent-token' ? fresh : old)
+      assert.equal(renewer.transportSnapshot().cookie, '', 'a concurrent edit prevents adoption of a stale session')
+    } else if (change === 'rejected') {
+      status = 401
+      const refused = await renewer.ensureFresh('manual')
+      assert.equal(refused.code, 'TOKEN_REJECTED')
+      assert.equal(h.values.TSINGHUA_API_KEY, old)
+      status = 200
+      await renewer.ensureFresh('manual')
+      assert.equal(logins, 2, 'a decisive refusal discards the candidate')
+      assert.equal(h.values.TSINGHUA_API_KEY, fresh)
+    } else {
+      if (change === 'identity') h.values.MADMODEL_PASSWORD = 'corrected-fixture-password'
+      else Date.now = () => now + 5 * HOUR
+      await renewer.ensureFresh('manual')
+      assert.equal(logins, 2, 'a changed identity or expired candidate needs a new login')
+      assert.equal(h.values.TSINGHUA_API_KEY, fresh)
+    }
+  } finally {
+    Date.now = originalNow
+    globalThis.fetch = originalFetch
+    chain.getMadModelToken = originalLogin
+    renewer.stop()
+    for (const dispose of h.disposers.reverse()) dispose()
+  }
+}
+
+{
+  const originalFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async () => new Response('unavailable', { status: 502 })
+    assert.equal(await probeDirectSite(), 'unknown', 'a 502 cannot select the campus transport')
+  } finally { globalThis.fetch = originalFetch }
 }
 
 // A login that minted no new token still opened a session, and off campus that

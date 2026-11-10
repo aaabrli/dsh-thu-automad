@@ -73,6 +73,8 @@ export interface ProxyPoolStatus {
   queued: number
   /** Epoch milliseconds the 429 pause ends, or null when not paused. */
   pausedUntil: number | null
+  /** Most recent upstream failure, cleared by a completed successful request. */
+  upstreamError: { status: number | null; at: number } | null
 }
 
 /** Options one proxy server is built with. */
@@ -269,6 +271,7 @@ interface Pool {
   cooldownMs: number
   /** Epoch milliseconds the pause ends. */
   pausedUntil: number
+  upstreamError: { status: number | null; at: number } | null
   /** Waiting requests, oldest first. */
   queue: Waiter[]
   /** Pending pump timer while paused. */
@@ -374,6 +377,7 @@ class Scheduler {
       inFlight: pool.inFlight,
       queued: pool.queue.length,
       pausedUntil: pool.pausedUntil > now ? pool.pausedUntil : null,
+      upstreamError: pool.upstreamError === null ? null : { ...pool.upstreamError },
     }))
   }
 
@@ -464,6 +468,11 @@ class Scheduler {
     this.pump(pool)
   }
 
+  /** Keep service health independent of queue capacity and token lifetime. */
+  noteUpstreamError(model: string, status: number | null): void {
+    this.poolFor(model).upstreamError = { status, at: Date.now() }
+  }
+
   /** Stop a keepalive, if one is running. */
   stopHeartbeat(waiting: WaitingState): void {
     if (waiting.heartbeatTimer !== undefined) clearTimeout(waiting.heartbeatTimer)
@@ -485,6 +494,7 @@ class Scheduler {
         successes: 0,
         cooldownMs: this.options.cooldownMs,
         pausedUntil: 0,
+        upstreamError: null,
         queue: [],
         pumpTimer: undefined,
         pumping: false,
@@ -519,6 +529,7 @@ class Scheduler {
         released = true
         pool.inFlight = Math.max(0, pool.inFlight - 1)
         if (success) {
+          pool.upstreamError = null
           pool.successes += 1
           pool.cooldownMs = this.options.cooldownMs
           if (pool.successes >= this.options.growAfter && pool.limit < pool.ceiling) {
@@ -604,7 +615,7 @@ class Scheduler {
 export async function startTransportProxy(options: ProxyOptions): Promise<RunningProxy> {
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES
   const scheduler = new Scheduler(options.concurrency ?? CONCURRENCY_DEFAULTS, options.log, KNOWN_MODELS)
-  const state: ProxyStatus = { listening: false, port: options.port, lastError: null, pools: [] }
+  const state: ProxyStatus = { listening: false, port: options.port, lastError: null, queueEnabled: true, pools: [] }
   let recovery: Recovery | null = null
 
   const resolveAuth = async (): Promise<ProxyAuth | null> => {
@@ -797,6 +808,7 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
             try {
               upstream = await dispatch(method, path, body, request.headers, currentAuth)
             } catch (error) {
+              scheduler.noteUpstreamError(facts.model, null)
               slot.release(false)
               slot = null
               activeSlot = null
@@ -810,6 +822,9 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
               slot = null
               activeSlot = null
               break
+            }
+            if (upstream.status >= 500 && upstream.status <= 599) {
+              scheduler.noteUpstreamError(facts.model, upstream.status)
             }
             if (isGateResponse(upstream, path)) {
               // The school's gate answered, not the gateway. Handing this
@@ -844,7 +859,8 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
             const owned = slot
             slot = null
             activeSlot = null
-            handOff(upstream, response, waiting.headersSent, (success) => { owned.release(success) })
+            handOff(upstream, response, waiting.headersSent, (success) => { owned.release(success) },
+              () => { scheduler.noteUpstreamError(facts.model, null) })
             return
           }
         } finally {
@@ -1089,6 +1105,7 @@ function handOff(
   response: ServerResponse,
   headersSent: boolean,
   done: (success: boolean) => void,
+  upstreamFailed?: () => void,
 ): void {
   let finished = false
   const finish = (success: boolean): void => {
@@ -1097,6 +1114,11 @@ function handOff(
     done(success)
   }
   const success = upstream.status >= 200 && upstream.status < 300
+  const streamFailed = (): void => {
+    if (!response.destroyed && !response.writableEnded) upstreamFailed?.()
+    response.destroy()
+    finish(false)
+  }
 
   if (response.destroyed || response.writableEnded) {
     upstream.stream.destroy()
@@ -1109,7 +1131,7 @@ function handOff(
     if (success && type.includes('text/event-stream')) {
       response.on('finish', () => { finish(true) })
       response.on('close', () => { finish(false) })
-      upstream.stream.on('error', () => { response.destroy() })
+      upstream.stream.on('error', streamFailed)
       upstream.stream.pipe(response)
       return
     }
@@ -1138,7 +1160,7 @@ function handOff(
   response.writeHead(upstream.status, headers)
   response.on('finish', () => { finish(success) })
   response.on('close', () => { finish(false) })
-  upstream.stream.on('error', () => { response.destroy() })
+  upstream.stream.on('error', streamFailed)
   upstream.stream.on('close', () => {
     if (!response.writableEnded) finish(false)
   })

@@ -39,6 +39,7 @@ export const css = {
   poolName: 'taPoolName',
   poolCount: 'taPoolCount',
   poolQueued: 'taPoolQueued',
+  poolUsage: 'taPoolUsage',
   poolPaused: 'taPoolPaused',
   segs: 'taSegs',
   seg: 'taSeg',
@@ -321,6 +322,7 @@ const STYLESHEET = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.taPoolUsage { flex: none; display: inline-flex; align-items: center; gap: 4px; }
 .taSegs { flex: none; display: inline-flex; gap: 2px; }
 .taSeg { width: 5px; height: 12px; border-radius: 1.5px; background: color-mix(in srgb, var(--ta-ink) 12%, transparent); }
 .taSeg[data-on] { background: var(--ta-accent); }
@@ -328,7 +330,7 @@ const STYLESHEET = `
 .taSeg[data-on][data-tone="error"] { background: var(--ta-error); }
 .taPoolCount {
   flex: none;
-  min-width: 30px;
+  min-width: 0;
   color: var(--ta-ink);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
@@ -336,7 +338,15 @@ const STYLESHEET = `
 }
 .taPoolCount[data-tone="warn"] { color: color-mix(in srgb, var(--ta-warn) 82%, var(--ta-ink)); }
 .taPoolCount[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); }
-.taPoolQueued { flex: none; color: var(--ta-warn); font-size: 11px; font-variant-numeric: tabular-nums; }
+.taPoolQueued {
+  flex: 0 0 4ch;
+  width: 4ch;
+  color: var(--ta-warn);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
 .taPoolPaused { flex: none; color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); font-size: 11px; font-variant-numeric: tabular-nums; }
 
 @media (prefers-reduced-motion: reduce) {

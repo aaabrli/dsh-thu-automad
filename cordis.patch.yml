@@ -154,8 +154,8 @@
           maxRetries: 5
           retryableCodes: [ EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT, PI_AI_ERROR ]
           backoff:
-            initialDelayMs: 500
-            maxDelayMs: 10000
+            initialDelayMs: 2000
+            maxDelayMs: 30000
             jitterRatio: 0.1
         models:
           - id: DeepSeek-V4.1-Flash

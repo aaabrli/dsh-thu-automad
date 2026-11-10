@@ -1,6 +1,6 @@
 /** Shared status readings and visual elements for settings and overlays. */
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import type { RenewStatus, TokenState, TokenStatus, TransportStatus } from '../protocol.ts'
+import type { RenewStatus, TokenState, TokenStatus, TransportPoolStatus, TransportStatus } from '../protocol.ts'
 import type { NS } from './locale.ts'
 import { formatTime } from './format.ts'
 import { css } from './styles.ts'
@@ -52,6 +52,7 @@ export function networkReading(transport: TransportStatus | undefined, t: Transl
 }
 
 export function renewalReading(renew: RenewStatus, t: TranslateNS<typeof NS>): Label {
+  if (renew.lastCode === 'VERIFICATION_PENDING') return { text: t('settings.renew.verificationPending'), tone: 'warn' }
   switch (renew.phase) {
     case 'scheduled': return { text: t('settings.renew.scheduled', { time: formatTime(renew.nextAttemptAt) }), tone: 'idle' }
     case 'running': return { text: t('settings.renew.running'), tone: 'warn' }
@@ -62,4 +63,13 @@ export function renewalReading(renew: RenewStatus, t: TranslateNS<typeof NS>): L
     case 'off': return { text: t('settings.renew.off'), tone: 'idle' }
     case 'idle': return { text: t('settings.renew.idle'), tone: 'idle' }
   }
+}
+
+/** The last observed service failure, rather than an inference from an idle queue. */
+export function poolFailureText(pool: TransportPoolStatus, t: TranslateNS<typeof NS>): string | null {
+  const error = pool.upstreamError
+  if (error == null) return null
+  return error.status === null
+    ? t('settings.queue.networkError')
+    : t('settings.queue.upstreamError', { status: String(error.status) })
 }

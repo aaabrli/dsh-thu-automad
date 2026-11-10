@@ -32,7 +32,7 @@ import { NS } from './locale.ts'
 import { renewFailureText } from './renew-copy.ts'
 import { css } from './styles.ts'
 import { useCountdown } from './use-countdown.ts'
-import { Badge, BrandMark, LifetimeMeter, networkReading, renewalReading, tokenReading } from './visuals.tsx'
+import { Badge, BrandMark, LifetimeMeter, networkReading, poolFailureText, renewalReading, tokenReading } from './visuals.tsx'
 import type { Tone } from './visuals.tsx'
 
 /** Full props of the settings section. */
@@ -156,7 +156,7 @@ export const SettingsSection = memo(function SettingsSection({
 
   let renewalDetail: string | null = null
   if (!renewing && renew.phase !== 'running') {
-    if (renewResult?.previousAttempt === renew.lastAttemptAt) renewalDetail = renewResultCopy(renewResult.outcome, t)
+    if (renewResult !== null && renewResult.previousAttempt === renew.lastAttemptAt) renewalDetail = renewResultCopy(renewResult.outcome, t)
     else if (renew.lastAttemptAt !== null) renewalDetail = lastResultText(status, t)
   }
   const queueEnabled = transport?.queueEnabled ?? true
@@ -375,14 +375,15 @@ function Row({
 function PoolRow({ pool, t }: { pool: TransportPoolStatus; t: TranslateNS<typeof NS> }) {
   const cooldown = useCountdown(pool.pausedUntil)
   const paused = pool.pausedUntil !== null && pool.pausedUntil > Date.now()
-  const tone: Tone = paused || pool.queued > 0 ? 'warn' : 'ok'
+  const failure = poolFailureText(pool, t)
+  const tone: Tone = failure !== null ? 'error' : paused || pool.queued > 0 ? 'warn' : pool.inFlight > 0 ? 'ok' : 'idle'
   const ceiling = pool.ceiling ?? pool.limit
   const shrunk = pool.limit < ceiling ? ` · ${t('settings.queue.shrunk', { limit: String(pool.limit) })}` : ''
-  const statusText = paused && cooldown !== null
+  const statusText = failure ?? (paused && cooldown !== null
     ? t('settings.queue.cooldown', { remaining: cooldown })
     : pool.queued > 0
       ? t('settings.queue.waiting')
-      : t('settings.queue.normal')
+      : t(pool.inFlight > 0 ? 'settings.queue.active' : 'settings.queue.normal'))
   return (
     <div className={css.row}>
       <div className={css.rowMain}>
@@ -497,6 +498,7 @@ function tokenHint(status: AutomadStatus, t: TranslateNS<typeof NS>): string | u
  */
 function lastResultText(status: AutomadStatus, t: TranslateNS<typeof NS>): string {
   const { renew } = status
+  if (renew.lastCode === 'VERIFICATION_PENDING') return renewFailureText(renew.lastCode, renew.lastMessage, t) ?? ''
   if (renew.lastCode === null) return t('settings.renew.lastOk', { time: formatTime(renew.lastAttemptAt) })
   const reason = renewFailureText(renew.lastCode, renew.lastMessage, t)
   if (reason !== null) return t('settings.renew.lastFailure', { reason })

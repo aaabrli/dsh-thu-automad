@@ -17,6 +17,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { startTransportProxy } from '../src/transport/proxy.ts'
 import { CONCURRENCY_DEFAULTS } from '../src/transport/concurrency.ts'
+import type { ConcurrencyOptions } from '../src/transport/concurrency.ts'
 
 const GOOD_COOKIE = 'wengine_vpn_ticket=good'
 const STALE_COOKIE = 'wengine_vpn_ticket=stale'
@@ -414,11 +415,11 @@ async function startCompletionGateway(
 /** Start a proxy bound to one fake gateway. */
 async function startQueueProxy(
   origin: string,
-  concurrency: Record<string, number>,
+  concurrency: Partial<ConcurrencyOptions>,
 ): Promise<Awaited<ReturnType<typeof startTransportProxy>>> {
   return await startTransportProxy({
     port: 0,
-    concurrency: concurrency as never,
+    concurrency: { ...CONCURRENCY_DEFAULTS, ...concurrency },
     resolveAuth: async () => ({ token: TOKEN, mode: 'webvpn', cookie: GOOD_COOKIE, tunnelPrefix: origin }),
     refresh: async () => false,
     log: () => {},
@@ -590,6 +591,8 @@ async function startQueueProxy(
   assert.equal(first.status, 200)
   controller.abort()
   await new Promise(resolve => setTimeout(resolve, 150))
+  assert.equal(proxy.status().pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')?.upstreamError, null,
+    'a user cancellation is not reported as an upstream outage')
 
   const second = await Promise.race([
     send(),
@@ -604,4 +607,69 @@ async function startQueueProxy(
 }
 
 await gateway.close()
+
+// Service health is per model, survives an idle queue, and clears only after
+// a successful completion. The provider remains the one bounded retry owner.
+{
+  let upstreamStatus = 502
+  let truncate = false
+  let sends = 0
+  const service = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      sends += 1
+      if (truncate) {
+        response.writeHead(200, { 'content-type': 'text/event-stream' })
+        response.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n')
+        setTimeout(() => response.destroy(), 20)
+        return
+      }
+      response.writeHead(upstreamStatus, { 'content-type': 'application/json' })
+      response.end(upstreamStatus === 200 ? '{"choices":[{"message":{}}]}'
+        : '{"error":{"message":"upstream unavailable","code":"upstream_unreachable"}}')
+    })
+  })
+  await new Promise<void>(resolve => service.listen(0, '127.0.0.1', resolve))
+  const origin = `http://127.0.0.1:${String((service.address() as AddressInfo).port)}`
+  const healthProxy = await startQueueProxy(origin, { ...CONCURRENCY_DEFAULTS })
+  const send = () => fetch(`http://127.0.0.1:${String(healthProxy.port)}/v1/chat/completions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'DeepSeek-V4.1-Flash', messages: [], stream: false }),
+  })
+  try {
+    const failed = await send()
+    assert.equal(failed.status, 502)
+    assert.match(await failed.text(), /upstream_unreachable/u, 'the upstream diagnostic is preserved')
+    let pool = healthProxy.status().pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')
+    assert.equal(pool?.upstreamError?.status, 502)
+    assert.equal(pool?.queued, 0)
+    assert.equal(sends, 1, 'a 502 is not replayed by a second retry loop')
+    assert.equal(healthProxy.status().pools.find(pool => pool.model === 'qwen3.8-27b')?.upstreamError, null)
+    upstreamStatus = 200
+    const recovered = await send()
+    await recovered.text()
+    await new Promise(resolve => setImmediate(resolve))
+    pool = healthProxy.status().pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')
+    assert.equal(pool?.upstreamError, null, 'a successful request clears the last service failure')
+    truncate = true
+    const interrupted = await send()
+    assert.equal(interrupted.status, 200)
+    await assert.rejects(() => interrupted.text(), 'a truncated upstream response fails the client body read')
+    await new Promise(resolve => setImmediate(resolve))
+    pool = healthProxy.status().pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')
+    assert.equal(pool?.upstreamError?.status, null)
+    assert.ok(pool?.upstreamError?.at, 'an upstream interruption is recorded after headers were sent')
+    await new Promise<void>(resolve => service.close(() => resolve()))
+    const disconnected = await send()
+    await disconnected.text()
+    pool = healthProxy.status().pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')
+    assert.equal(disconnected.status, 502)
+    assert.equal(pool?.upstreamError?.status, null)
+    assert.ok(pool?.upstreamError?.at, 'a connection failure is recorded without private diagnostic text')
+  } finally {
+    await healthProxy.close()
+    service.closeAllConnections()
+    await new Promise<void>(resolve => service.close(() => resolve()))
+  }
+}
 console.log('transport-smoke: ok')

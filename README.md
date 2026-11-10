@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-3B82F6?style=flat-square">
+  <img alt="version" src="https://img.shields.io/github/package-json/v/aaabrli/dsh-thu-automad?style=flat-square&label=version">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-2EA043?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/DSH-Web%20%7C%20Desktop-8A2BE2?style=flat-square">
   <img alt="Tsinghua MadModel" src="https://img.shields.io/badge/%E6%B8%85%E5%8D%8E-MadModel-660874?style=flat-square">
@@ -34,11 +34,12 @@
 | 能力 | 说明 |
 | :--- | :--- |
 | **自动续期** | 提前 1 小时用学号 + 统一认证口令重新登录，新 token 写回 `TSINGHUA_API_KEY`；剩余 30 分钟时状态药丸转琥珀色。 |
+| **延后校验** | 续期校验遇到 5xx 或连接失败时保留当前 token，候选令牌留在宿主内存中；退避后重试同一候选的校验，复用已经完成的登录。 |
 | **校内 / 校外** | 校内直连换票；校外走 统一认证 → WebVPN 会话 → 隧道内换票，请求随隧道 cookie 转发。 |
 | **本地传输层** | provider 指向 `127.0.0.1:43110/v1`，按当前网络自动选择直连或隧道；SSE 边收边转。 |
 | **并发排队** | 网关按模型限流，超出的请求在本地排队，429 冷却后重发同一个请求，不换模型、不打断对话。 |
 | **失败策略** | 有序规则表：`renew` / `retry` / `switch` / `ask` / `fail`。 |
-| **设置页与状态卡** | 概览、模型与并发、连接三个区块；状态药丸点开是剩余寿命、通道与续期，以及逐模型的并发槽位（在用/上限、排队、429 冷却倒计时）。 |
+| **设置页与状态卡** | 概览、模型与并发、连接三个区块；状态药丸点开可看剩余寿命、通道与续期，以及逐模型的并发槽位。排队数固定显示在槽位左侧，槽位与计数间隔 4px；队列数量变化时布局稳定。模型行记录最近的上游故障，成功请求后清除；空闲、运行和服务异常分别显示。 |
 
 ## 安装
 
@@ -133,6 +134,12 @@ provider 行 ──> http://127.0.0.1:43110/v1 ──┬─ 校内：https://mad
 
 **模型并发被占满时续期会失败吗？** 不会。续期后的校验探针遇到 429 会先重试两次；仍然忙就保留这次续期结果，只在结果里标注「未先行校验」，把排队交给真实请求自己走。429 是网关的排队信号，不是对这张 token 的判断。
 
+**续期显示「等待校验」？** 学校已经返回候选令牌，但模型接口在校验时返回 5xx，或连接没有得到响应。当前令牌与隧道会话继续保留；自动续期启用时，插件会按退避计划重试候选令牌的校验，点「立即续期」也会优先重试校验。候选过期、账号/令牌变更或网络通道变化后，会重新评估登录。候选只存在当前宿主内存中，退出程序后清除；401/403 鉴权拒绝仍按失败处理。
+
+**模型行显示上游服务异常？** 这是最近一次真实请求观察到的 5xx 或连接失败，队列空闲时也会保留，直到该模型有成功请求。检查状态本身不会发送新的模型请求。模型请求的自动重试由 DSH 统一管理，bundle 默认最多重试 5 次，退避从 2 秒增长到最多 30 秒；插件不会另外叠加一轮 5xx 请求重试。学校后端持续不可达时，需要等待服务恢复或选择其他已配置的服务。
+
+上游在响应开始后断流也会记录为连接失败，主动取消请求不会触发这条故障记录。令牌过期、被拒绝或尚未配置时，底部药丸优先提示需要处理的凭据状态。
+
 **状态卡显示「本地端口未监听」？** 端口被占用，传输层没起来；换端口时同步改 provider 的 `baseURL`。
 
 ## 隐私与安全
@@ -158,6 +165,8 @@ node node_modules/tsx/dist/cli.mjs checks/policy-smoke.ts
 node node_modules/tsx/dist/cli.mjs checks/client-smoke.ts
 node node_modules/tsx/dist/cli.mjs checks/transport-smoke.ts
 ```
+
+这些检查使用模拟认证响应与本机假网关，不需要真实账号。近期修复的本地检查与布局证据见 [LOG.md](LOG.md)，用户可见变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 本地调试时用 profile 的 `link:` 依赖指向本目录，改完重启 DSH。
 

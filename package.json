@@ -1,6 +1,6 @@
 {
   "name": "dsh-thu-automad",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "displayName": "DSH-thu-automad",
   "icon": "icon.svg",
   "description": "Tsinghua MadModel automation for the dsh Web UI: watch the campus token's JWT expiry, renew it unattended through the school's authentication chain (direct on campus, WebVPN tunnel off campus), and serve the model provider from a loopback transport.",
@@ -24,7 +24,8 @@
     "icon.svg",
     "cordis.patch.yml",
     "dev.overlay.yml",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "dsh": {
     "bundle": {
