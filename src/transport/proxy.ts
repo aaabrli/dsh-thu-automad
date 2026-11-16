@@ -232,6 +232,12 @@ interface WaitingState {
   heartbeat: ReturnType<typeof setInterval> | undefined
 }
 
+/** Refusals in a row that a pause failed to clear before the limit halves. */
+const REFUSALS_BEFORE_HALVING = 3
+
+/** 429s one request may absorb from the gateway before it reports a failure. */
+const MAX_GATEWAY_REFUSALS = 8
+
 /** One request waiting for a model slot. */
 interface Waiter {
   /** Tracked keepalive state; shared across a retry. */
@@ -267,6 +273,8 @@ interface Pool {
   inFlight: number
   /** Completed requests since the limit last moved. */
   successes: number
+  /** 429 refusals since the limit last moved, cleared by a completion. */
+  rateLimitedRuns: number
   /** Current pause after a 429. */
   cooldownMs: number
   /** Epoch milliseconds the pause ends. */
@@ -295,10 +303,11 @@ class QueueError extends Error {
  * A per-model admission controller.
  *
  * It knows nothing about HTTP: the server asks for a slot, hands the request to
- * the upstream, and reports the outcome. The limit starts conservative, grows
- * after a run of successful completions, and halves on a 429; a 429 also pauses
- * the whole model for a growing cooldown so a burst does not keep hammering the
- * gateway.
+ * the upstream, and reports the outcome. The limit starts conservative and grows
+ * after a run of successful completions; a 429 pauses the whole model for a
+ * growing cooldown and returns the refused request to the head of the queue. One
+ * refusal does not lower the limit — the ceiling is already the gateway's own, so
+ * only a run of refusals the pause failed to clear halves it.
  */
 class Scheduler {
   private readonly pools = new Map<string, Pool>()
@@ -394,6 +403,7 @@ class Scheduler {
     stream: boolean,
     response: ServerResponse,
     waiting: WaitingState,
+    front = false,
   ): Promise<Slot | null> {
     const pool = this.poolFor(model)
     if (waiting.stopped || response.destroyed || response.writableEnded) return null
@@ -418,7 +428,10 @@ class Scheduler {
         reject,
         granted: false,
       }
-      pool.queue.push(waiter)
+      // A retry that already waited once goes back to the head: the gateway
+      // refused it, this queue did not.
+      if (front) pool.queue.unshift(waiter)
+      else pool.queue.push(waiter)
       this.armHeartbeat(waiter)
       if (this.options.maxWaitMs > 0) {
         const timer = setTimeout(() => {
@@ -456,10 +469,16 @@ class Scheduler {
     const pause = Math.max(pool.cooldownMs, retryAfterMs ?? 0)
     pool.pausedUntil = Math.max(pool.pausedUntil, Date.now() + pause)
     pool.cooldownMs = Math.min(this.options.maxCooldownMs, pool.cooldownMs * 2)
-    // Halve gently: 3 → 2 → 1. One refusal usually means a burst (background
-    // title/suggestion calls, another window), not that the account can only
-    // run one request. Repeated refusals still reach the floor.
-    pool.limit = Math.max(this.options.min, Math.ceil(pool.limit / 2))
+    // Keep the limit for a single refusal: the ceiling here is already the
+    // gateway's own, and one 429 usually means a burst this plugin cannot see
+    // (another window, the phone client, background title/suggestion calls).
+    // Halving it then throws away capacity the account still has. Only a run of
+    // refusals that the growing pause failed to clear means the ceiling moved.
+    pool.rateLimitedRuns += 1
+    if (pool.rateLimitedRuns >= REFUSALS_BEFORE_HALVING) {
+      pool.limit = Math.max(this.options.min, Math.ceil(pool.limit / 2))
+      pool.rateLimitedRuns = 0
+    }
     pool.successes = 0
     this.log(
       `"${model}" answered 429: pausing ${String(pause)} ms, limit now ${String(pool.limit)}, `
@@ -492,6 +511,7 @@ class Scheduler {
         ceiling: Math.max(limit, this.ceilingFor(model)),
         inFlight: 0,
         successes: 0,
+        rateLimitedRuns: 0,
         cooldownMs: this.options.cooldownMs,
         pausedUntil: 0,
         upstreamError: null,
@@ -530,6 +550,7 @@ class Scheduler {
         pool.inFlight = Math.max(0, pool.inFlight - 1)
         if (success) {
           pool.upstreamError = null
+          pool.rateLimitedRuns = 0
           pool.successes += 1
           pool.cooldownMs = this.options.cooldownMs
           if (pool.successes >= this.options.growAfter && pool.limit < pool.ceiling) {
@@ -782,11 +803,14 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
       activeSlot = null
     }
     response.once('close', onClose)
+    let requeueFront = false
+    let refusals = 0
     try {
       for (;;) {
         let slot: Slot | null
         try {
-          slot = await scheduler.acquire(facts.model, facts.stream, response, waiting)
+          slot = await scheduler.acquire(facts.model, facts.stream, response, waiting, requeueFront)
+          requeueFront = false
         } catch (error) {
           if (error instanceof QueueError && error.code === 'client_gone') return
           const message = error instanceof Error ? error.message : String(error)
@@ -821,6 +845,15 @@ export async function startTransportProxy(options: ProxyOptions): Promise<Runnin
               slot.release(false)
               slot = null
               activeSlot = null
+              // The refusal is the gateway's, not this request's: keep it and
+              // queue again at the head instead of dropping it, so the caller
+              // waits for a slot rather than for a 1-hour timeout.
+              if (refusals >= MAX_GATEWAY_REFUSALS) {
+                fail(response, waiting, 503, `thu-automad: the gateway refused ${String(refusals)} attempts for "${facts.model}"`)
+                return
+              }
+              refusals += 1
+              requeueFront = true
               break
             }
             if (upstream.status >= 500 && upstream.status <= 599) {

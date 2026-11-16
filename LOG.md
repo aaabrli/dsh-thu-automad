@@ -1,5 +1,25 @@
 # 修复记录
 
+## 2026-11-16：429 不再丢请求，也不再一撞就把并发砍半
+
+**原因**：网关按“账号 + 模型”限在途完成数（V4.1-Flash 3、Qwen 4、R1 1）。撞到 429 后原实现把该模型 limit 减半（3→2→1），且要连续 4 次成功才回升；多会话并行时成功计数反复被 429 清零，limit 长期停在 2。状态卡分母用的是 ceiling（配置上限），于是显示成“2/3 没满”，实际是 2/2 已满，队列只能一直等。
+
+**改动**：
+
+- 429 不再丢掉被拒的请求：`acquire` 新增 `front` 参数，重排时插回队首，客户端等到的是槽位而不是请求预算耗尽；同一请求最多吸收 8 次网关拒绝（`MAX_GATEWAY_REFUSALS`），超过才返回 503 并带上模型名。
+- 单次 429 只暂停不减半：ceiling 本来就是网关自己的上限，减半等于主动放弃账号还剩的容量。连续 3 次暂停仍没清掉（`REFUSALS_BEFORE_HALVING`）才减半，任一次成功即清零。
+- `checks/transport-smoke.ts` 新增用例：连吃 3 次 429 后同一请求仍返回 200、队列清零、limit 恰为 2。
+
+**验证**：
+
+- `pnpm run build` 通过（lib/index.js 120.4kb、lib/client.js 109.7kb）。
+- `pnpm run check:transport` 通过（transport-smoke: ok，含新增用例）。改动前的实现在“3 次 429 后 limit 仍为 2”这条断言上会失败。
+- 完整 `tsc` 仍未跑通：项目缺 `@types/node` 与 DSH 宿主类型声明，与本次改动无关（见 2026-11-10 条）。真实校园网 429 未复现，只在本机假网关上验证。
+
+**还差**：状态卡分母仍是 ceiling（[src/client/StatusLink.tsx](src/client/StatusLink.tsx) 的 `PoolRow`），`limit < ceiling` 时不显示“当前限额”，所以减半后从卡片上依旧看不出已满。改法与设置页一致：分母换 `pool.limit`，并把 `settings.queue.shrunk` 一并画出来。
+
+**生效**：本机 profile 通过 junction 指向此项目，需完整退出并重启 DSH 才加载新的 `lib/index.js`。
+
 ## 2026-11-10：0.3.1 续期恢复、状态显示与发布复核
 
 **原因**：学校网关返回 `502 / upstream_unreachable` 时，原续期逻辑放弃候选令牌，后续需要重新登录；队列空闲的状态也不能表达已经发生的服务故障。状态卡需要在排队数量变化时保持布局稳定。

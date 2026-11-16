@@ -496,6 +496,52 @@ async function startQueueProxy(
 }
 
 /**
+ * A refused request keeps its place in the queue, and one 429 no longer halves
+ * the limit: the configured ceiling is already the gateway's own, so halving it
+ * would only cost capacity the account still has.
+ */
+{
+  let attempts = 0
+  const server = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      attempts += 1
+      if (attempts <= 3) {
+        response.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0' })
+        response.end('{"error":{"type":"rate_limit_error","code":429}}')
+        return
+      }
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.end('data: [DONE]\n\n')
+    })
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => { resolve() })
+  })
+  server.unref()
+  const origin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
+  const proxy = await startQueueProxy(origin, {
+    initial: 3, max: 3, min: 1, growAfter: 10, queueLimit: 8, maxWaitMs: 0,
+    heartbeatAfterMs: 20, heartbeatMs: 20, cooldownMs: 20, maxCooldownMs: 40,
+  })
+  const reading = () => proxy.status().pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')
+  const response = await fetch(`http://127.0.0.1:${String(proxy.port)}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'DeepSeek-V4.1-Flash', messages: [], stream: true }),
+  })
+  const text = await response.text()
+  assert.equal(response.status, 200, 'the refused request is served once a slot frees')
+  assert.match(text, /\[DONE\]/u)
+  assert.equal(attempts, 4, 'each refusal put the same request back in the queue')
+  assert.equal(reading()?.limit, 2, 'three refusals in a row are what halves the limit')
+  assert.equal(reading()?.queued, 0, 'nothing is left waiting after the answer')
+  await proxy.close()
+  await new Promise<void>((resolve) => { server.close(() => { resolve() }) })
+}
+
+/**
  * A request that waits long enough for a keepalive gets SSE comments, then the
  * real answer on the same connection.
  */
