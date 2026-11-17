@@ -1,18 +1,4 @@
-/**
- * Configured failure policy: ordered rules that decide what one failed model
- * request does next.
- *
- * This package ships outside the harness workspace and therefore resolves no
- * harness runtime value, including the shared schema package. It validates its
- * own fields instead and throws from `apply`, which fails the plugin's fiber at
- * the same moment a declared schema would, with a message naming the field.
- *
- * The `renew` action is the one addition over the standalone policy plugin: a
- * credential refusal is no longer terminal for a provider whose token this
- * package can re-acquire, so `onFailure` names what happens when the renewal
- * itself cannot proceed.
- * @module dsh-thu-automad/policy/config
- */
+/** Parse model request failure rules and user choices. */
 
 /** One provider route a request may be sent to. */
 export interface Route {
@@ -65,16 +51,7 @@ export interface Rule {
   to?: Route
   /** Required by `action: 'ask'`, and by `action: 'renew'` with `onFailure: 'ask'`. */
   ask?: AskSpec
-  /**
-   * How many failures of one turn-and-step this rule leaves to whatever else
-   * owns retries before it acts at all.
-   *
-   * Each delegated failure is the retry owner's to answer, so this is how a
-   * rule retries first and acts only once that budget is spent: with the
-   * harness retry owner's `maxRetries: 5`, `afterRetries: 5` shows its five
-   * "(n/5)" attempts and brings the rule in on the sixth failure. Zero acts on
-   * the first failure.
-   */
+  /** How many failures of one turn-and-step this rule leaves to whatever else owns retries before it acts at all. */
   afterRetries: number
   /**
    * Required by `action: 'renew'`: what happens once renewal failed, needed a

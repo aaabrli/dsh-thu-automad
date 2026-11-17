@@ -1,12 +1,3 @@
-# Development overlay for a checkout that owns this plugin.
-#
-#   pnpm dsh web --patch ./thu-automad/dev.overlay.yml
-#
-# The row names the Host entry relative to this file, so it loads straight from
-# src/ through the checkout's tsx hook. The browser half still comes from the
-# built bundle, because the client scan reads `exports["./client"]` from
-# package.json: run `pnpm --dir thu-automad build` (or `tsdown --watch`) after
-# changing anything under src/client/.
 - insert:
     - id: thu-automad
       name: ./src/index.ts
@@ -52,7 +43,4 @@
                   }
                 - { label: "这次放弃", action: fail }
               timeoutMs: 120000
-              # 无人应答时不静默切走：deepseek-official 由基础 bundle 提供，但它要
-              # DEEPSEEK_API_KEY，纯清华用户没有；自动切过去只会把一次网关故障换成
-              # 一条 MISSING_CREDENTIAL。停下来比换到一个没有凭据的路由好排查。
               unavailable: { label: "放弃这一轮", action: fail }

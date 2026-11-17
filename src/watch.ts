@@ -1,12 +1,4 @@
-/**
- * Host-side lifecycle tracking for one credential reference.
- *
- * Three sources of truth feed one state, cheapest first: the token's own `exp`
- * claim, any provider refusal observed on a real request, and an optional
- * authenticated probe. A refusal outranks the clock because it is evidence,
- * and a successful request clears an earlier refusal because it disproves one.
- * @module dsh-thu-automad/watch
- */
+/** Track token expiry, authentication refusals and successful requests. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-credentials'
@@ -23,25 +15,11 @@ interface Refusal {
   at: number
   /** Provider refusal text, truncated. */
   message: string
-  /**
-   * Fingerprint of the value the provider refused, or null when the refusal was
-   * recorded before any value had been read.
-   *
-   * A refusal is evidence about one credential, so it must not outlive it. The
-   * change-detection branch in {@link TokenWatch.refresh} only fires for a
-   * replacement this process watched happen; this field covers the other case,
-   * where the value was replaced (by a renewal, another process, or a paste)
-   * between the refusal and the next read.
-   */
+  /** Fingerprint of the value the provider refused, or null when the refusal was recorded before any value had been read. */
   fingerprint: string | null
 }
 
-/**
- * Track the lifecycle of one credential reference over the plugin's lifetime.
- *
- * The credential value itself is never retained: only a fingerprint of it,
- * which is all this plugin needs to notice a rotation and drop a stale refusal.
- */
+/** Track the lifecycle of one credential reference over the plugin's lifetime. */
 export class TokenWatch {
   private configured = false
   private source: string | null = null
@@ -58,13 +36,7 @@ export class TokenWatch {
    */
   constructor(private readonly ctx: Context, private readonly options: TokenWatchOptions) {}
 
-  /**
-   * Re-resolve the reference and rebuild every fact derived from its value.
-   *
-   * Consumers re-resolve once per operation, so a token pasted into the
-   * settings page reaches the next status read without a plugin restart.
-   * @returns a promise settling once the stored credential has been read.
-   */
+  /** Re-resolve the reference and rebuild every fact derived from its value. */
   async refresh(): Promise<void> {
     const resolved = await this.ctx.credentials.resolve(this.options.credentialRef)
     if (resolved === undefined) {
@@ -85,9 +57,7 @@ export class TokenWatch {
     this.source = resolved.source
     this.issuedAt = times?.issuedAt ?? null
     this.expiresAt = times?.expiresAt ?? null
-    // Only an observed replacement dates the value. The first read of a
-    // process learns nothing about when the stored value arrived, and dating
-    // it "now" would discard a refusal recorded moments earlier as stale.
+    // Date token changes after the first credential read.
     if (previous !== null && previous !== fingerprint) {
       this.changedAt = Date.now()
       this.refusal = null
@@ -120,7 +90,7 @@ export class TokenWatch {
   /**
    * Ask the provider whether the credential still works, without spending a
    * generation. Only a decisive answer changes state: an unreachable probe
-   * leaves the previous facts standing rather than inventing a failure.
+   * retains the current state.
    * @returns a promise settling once the probe has been classified.
    */
   async probe(): Promise<void> {
@@ -186,13 +156,7 @@ export class TokenWatch {
     return this.expiresAt - now <= this.options.warnBeforeMs ? 'expiring' : 'ok'
   }
 
-  /**
-   * Whether the recorded refusal still describes the stored credential.
-   *
-   * A refusal names the value it was recorded against, so a value that has been
-   * replaced since retires it even when this process never saw the change.
-   * @returns true when the refusal is evidence about the current value.
-   */
+  /** Whether the recorded refusal still describes the stored credential. */
   private refusalStands(): boolean {
     const refusal = this.refusal
     if (refusal === null) return false
@@ -203,15 +167,7 @@ export class TokenWatch {
   }
 }
 
-/**
- * Whether a thrown value is a provider authentication refusal.
- *
- * The harness's `LlmError` carries a machine code and, when the provider
- * answered, an HTTP status; both are read structurally so this package needs
- * no runtime import of the error class.
- * @param error - value a model request failed with.
- * @returns true when the provider refused the credential.
- */
+/** Whether a thrown value is a provider authentication refusal. */
 export function isAuthRefusal(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false
   const record = error as Record<string, unknown>

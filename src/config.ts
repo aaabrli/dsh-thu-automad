@@ -1,19 +1,4 @@
-/**
- * Configuration for both halves of the plugin, validated at load.
- *
- * Three families share one `config` mapping because they share one failure
- * site: the credential watch decides *when* a token needs replacing, the auth
- * block says *how* to replace it, and the rules say what a request does when a
- * replacement is not the answer. Every value a deployment could reasonably want
- * to change lives here; the school's endpoint constants do not, because they
- * are a reverse-engineered external specification rather than a preference.
- *
- * This package ships outside the harness workspace and therefore resolves no
- * harness runtime value, including the shared schema package. It validates its
- * own fields instead and throws from `apply`, which fails the plugin's fiber at
- * the same moment a declared schema would, with a message naming the field.
- * @module dsh-thu-automad/config
- */
+/** Parse account, transport, renewal and failure-policy settings. */
 
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Rule } from './policy/config.ts'
@@ -181,9 +166,7 @@ export function resolveOptions(config: unknown): AutomadOptions {
   if (checkIntervalMs < MIN_CHECK_INTERVAL_MS) {
     throw new Error(`thu-automad: checkIntervalMs must be at least ${String(MIN_CHECK_INTERVAL_MS)}`)
   }
-  // A renewal that lands after the warning window would paint the pill amber
-  // and then green again on every ordinary cycle, which destroys the meaning of
-  // amber. The narrower window is the one that must contain the wider.
+  // Renew before the warning window starts.
   if (refreshAheadMs !== 0 && refreshAheadMs < warnBeforeMs) {
     throw new Error('thu-automad: refreshAheadMs must be 0 (disabled) or at least warnBeforeMs')
   }
@@ -204,9 +187,7 @@ export function resolveOptions(config: unknown): AutomadOptions {
     }
   }
 
-  // The credentials seam brands a reference at its own factory, which this
-  // package deliberately does not import at runtime; the grammar above is that
-  // factory's own, so the brand stays a compile-time-only assertion.
+  // Credential references use the host service grammar.
   return {
     credentialRef,
     label,
@@ -266,31 +247,20 @@ function resolveConcurrency(raw: unknown): ConcurrencyOptions {
     throw new Error('thu-automad: transport.concurrency must be a mapping')
   }
   const value = (raw ?? {}) as Record<string, unknown>
-  const known = new Set(Object.keys(CONCURRENCY_DEFAULTS))
+  const known = new Set([...Object.keys(CONCURRENCY_DEFAULTS), 'initial', 'min', 'growAfter', 'maxCooldownMs'])
   for (const key of Object.keys(value)) {
     if (!known.has(key)) throw new Error(`thu-automad: unknown transport.concurrency key "${key}"`)
   }
   const options: ConcurrencyOptions = {
-    initial: count(value, 'initial', CONCURRENCY_DEFAULTS.initial),
-    max: count(value, 'max', CONCURRENCY_DEFAULTS.max),
-    min: count(value, 'min', CONCURRENCY_DEFAULTS.min),
-    growAfter: count(value, 'growAfter', CONCURRENCY_DEFAULTS.growAfter),
+    max: count(value, 'max', count(value, 'initial', CONCURRENCY_DEFAULTS.max)),
     queueLimit: count(value, 'queueLimit', CONCURRENCY_DEFAULTS.queueLimit),
     maxWaitMs: count(value, 'maxWaitMs', CONCURRENCY_DEFAULTS.maxWaitMs),
     heartbeatAfterMs: count(value, 'heartbeatAfterMs', CONCURRENCY_DEFAULTS.heartbeatAfterMs),
     heartbeatMs: count(value, 'heartbeatMs', CONCURRENCY_DEFAULTS.heartbeatMs),
     cooldownMs: count(value, 'cooldownMs', CONCURRENCY_DEFAULTS.cooldownMs),
-    maxCooldownMs: count(value, 'maxCooldownMs', CONCURRENCY_DEFAULTS.maxCooldownMs),
     perModel: resolvePerModel(value.perModel),
   }
-  if (options.initial < 1) throw new Error('thu-automad: transport.concurrency.initial must be at least 1')
-  if (options.min < 1 || options.min > options.initial) {
-    throw new Error('thu-automad: transport.concurrency.min must be between 1 and initial')
-  }
-  if (options.max < options.initial) {
-    throw new Error('thu-automad: transport.concurrency.max must be at least initial')
-  }
-  if (options.growAfter < 1) throw new Error('thu-automad: transport.concurrency.growAfter must be at least 1')
+  if (options.max < 1) throw new Error('thu-automad: transport.concurrency.max must be at least 1')
   if (options.queueLimit < 1) throw new Error('thu-automad: transport.concurrency.queueLimit must be at least 1')
   if (options.heartbeatAfterMs < 1_000) {
     throw new Error('thu-automad: transport.concurrency.heartbeatAfterMs must be at least 1000')
@@ -301,24 +271,16 @@ function resolveConcurrency(raw: unknown): ConcurrencyOptions {
   if (options.cooldownMs < 1_000) {
     throw new Error('thu-automad: transport.concurrency.cooldownMs must be at least 1000')
   }
-  if (options.maxCooldownMs < options.cooldownMs) {
-    throw new Error('thu-automad: transport.concurrency.maxCooldownMs must be at least cooldownMs')
-  }
-  for (const [model, limit] of Object.entries(options.perModel ?? {})) {
-    if (limit < options.min) {
-      throw new Error(`thu-automad: transport.concurrency.perModel["${model}"] must be at least min`)
-    }
-  }
   return options
 }
 
 /** Read the optional per-model ceiling map. */
 function resolvePerModel(raw: unknown): Record<string, number> {
-  if (raw === undefined) return {}
+  const result: Record<string, number> = { ...CONCURRENCY_DEFAULTS.perModel }
+  if (raw === undefined) return result
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     throw new Error('thu-automad: transport.concurrency.perModel must be a mapping')
   }
-  const result: Record<string, number> = {}
   for (const [model, limit] of Object.entries(raw)) {
     if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
       throw new Error(`thu-automad: transport.concurrency.perModel["${model}"] must be a positive integer`)

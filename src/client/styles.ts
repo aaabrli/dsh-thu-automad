@@ -1,14 +1,4 @@
-/**
- * Class names and the one stylesheet this plugin injects.
- *
- * The bundle carries no CSS pipeline, so the stylesheet is a plain string
- * mounted as its own `<style>` element for the plugin's lifetime, keyed by a
- * data attribute so a hot reload cannot stack duplicates.
- *
- * Plugin surfaces share a palette and spacing scale derived from the shell's
- * `--dsw-*` tokens. DSH primitives own form controls and modal behavior.
- * @module dsh-thu-automad/client/styles
- */
+/** Styles for the status card, settings and two-factor dialog. */
 
 import iconSvg from '../../icon.svg'
 
@@ -347,7 +337,8 @@ const STYLESHEET = `
   text-align: right;
   white-space: nowrap;
 }
-.taPoolPaused { flex: none; color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); font-size: 11px; font-variant-numeric: tabular-nums; }
+.taPoolPaused { flex: none; font-size: 11px; font-variant-numeric: tabular-nums; }
+.taPoolPaused[data-tone="error"] { color: color-mix(in srgb, var(--ta-error) 82%, var(--ta-ink)); }
 
 @media (prefers-reduced-motion: reduce) {
   .taCardLife > i { transition: none; }

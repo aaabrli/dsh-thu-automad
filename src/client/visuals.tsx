@@ -65,7 +65,7 @@ export function renewalReading(renew: RenewStatus, t: TranslateNS<typeof NS>): L
   }
 }
 
-/** The last observed service failure, rather than an inference from an idle queue. */
+/** Format the model's most recent service failure. */
 export function poolFailureText(pool: TransportPoolStatus, t: TranslateNS<typeof NS>): string | null {
   const error = pool.upstreamError
   if (error == null) return null

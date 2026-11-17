@@ -1,14 +1,4 @@
-/**
- * Stub Context shared by this package's Host-side checks. It is not part of the
- * harness repository; it exists so the real `apply` can be driven without a
- * running dsh.
- *
- * The pieces are deliberately thin: an event registry, an effect collector, a
- * credentials seam backed by two plain maps, an exact-Fetch registry, and a
- * controllable clock through `setInterval`. Anything a check needs to observe
- * is captured here rather than mocked per case, so a check reads as a statement
- * about the plugin.
- */
+/** Simulated host services used by the behavior checks. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CredentialRecord } from '@deepseek-ai/dsh-credentials'
@@ -192,9 +182,7 @@ export function harness(options: HarnessOptions = {}): Harness {
       },
     },
     get: (service: string) => {
-      // Models an eager read of an already-present Connection. The plugin must
-      // not depend on this path — an eager read is what breaks a route
-      // registration when Connection activates later.
+      // Expose Connection immediately when the test configuration provides it.
       if (service === 'connection') {
         return options.withConnection !== false ? ctx.connection : undefined
       }

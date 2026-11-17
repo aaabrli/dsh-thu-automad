@@ -1,12 +1,4 @@
-/**
- * What the plugin has done since it loaded.
- *
- * A listener-only plugin is invisible: nothing about it can be observed from
- * outside the process, so "is it running" has no answer. This ledger is that
- * answer — it is published on a read-only route and therefore also proves the
- * plugin's own `apply` ran.
- * @module dsh-thu-automad/policy/status
- */
+/** Track request failure decisions for the status API. */
 
 import type { Resolution, Route, Rule } from './config.ts'
 
@@ -99,14 +91,7 @@ export class StatusLedger {
     }
   }
 
-  /**
-   * Record that one failure was answered by re-acquiring the credential.
-   *
-   * Counted beside the action rather than as one: a renewal that worked ends in
-   * a retry, and one that needed a human ends in whatever `onFailure` named, so
-   * the action counts say what happened to the request while this says how
-   * often the credential was re-acquired to get there.
-   */
+  /** Record that one failure was answered by re-acquiring the credential. */
   noteRenewal(): void {
     this.decisions.renew += 1
   }

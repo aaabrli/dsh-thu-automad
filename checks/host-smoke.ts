@@ -1,16 +1,4 @@
-/**
- * Local behavioral check for the Host half. It is not part of the harness
- * repository; run it from this package directory:
- *
- *   ../node_modules/.bin/tsx checks/host-smoke.ts
- *
- * It loads `src/index.ts` (no build step) and drives the real `apply` against
- * the shared stub Context: the merged status document, the credential watch's
- * attribution, the renewal schedule's offline-decidable outcomes, the durable
- * session record, the two-factor queue, and every route.
- *
- * Sign-in and gateway responses are simulated; no real school account is used.
- */
+/** Check token tracking, renewal, settings and authentication flows. */
 
 import assert from 'node:assert/strict'
 import { apply, isAutomadStatus, resolveOptions } from '../src/index.ts'
@@ -19,6 +7,7 @@ import { SessionStore } from '../src/auth/session.ts'
 import { probeDirectSite, probeUpstream } from '../src/auth/verify.ts'
 import { RENEW_PATH, SETTINGS_PATH, STATUS_PATH, TWO_FACTOR_PATH } from '../src/protocol.ts'
 import { Renewer } from '../src/renew.ts'
+import { TITLE_REQUEST_HEADER } from '../src/transport/proxy.ts'
 import { TwoFactorQueue } from '../src/two-factor.ts'
 import { call, harness, post, route, settle, token } from './harness.ts'
 
@@ -319,9 +308,7 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   assert.equal(queue.answer({ stage: 'cancel' }), 'accepted')
   assert.equal(await cancelled, '', 'cancelling settles with the empty answer the chain reads as give-up')
 
-  // The timeout is what keeps a renewal from hanging forever when nobody is
-  // looking; it settles with the same give-up answer. A second queue carries a
-  // millisecond budget so the check does not wait out the real one.
+  // The two-factor question expires at its configured deadline.
   const impatient = new TwoFactorQueue(20, () => clock)
   const abandoned = impatient.handler()({ stage: 'method', methods: ['totp'], phone: null })
   assert.equal(impatient.snapshot()?.stage, 'method')
@@ -418,22 +405,15 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   assert.equal(offline.verdict, 'network', 'a transport failure is never a claim about the credential')
 }
 
-// The off-campus chain exists as a *client* method in the vendored entry, not as
-// a module function. A module-shaped call throws before the first request — and
-// every other case here patches the chain, so they would happily patch a
-// function production never reaches.
+// The vendored WebVPN API is a client method.
 {
   const auth = loadAuth()
   const client = new auth.MadmodelAuthClient(new auth.CookieJar())
   assert.equal(typeof client.getMadModelToken, 'function', 'the WebVPN chain hangs off the vendored client')
 }
 
-// A gateway that answers "wait" is not a verdict on the token: the probe gives
-// it two more tries and then keeps the renewal, because discarding a token the
-// school just minted would send the next tick through another login while the
-// account is busiest. A connection failure is different and still preserves the
-// old pair and retains its candidate for verification. A valid streaming choice
-// rotates without closing the stream.
+// Busy models still permit renewal. An outage across all models defers the
+// candidate. One valid streaming choice can verify it.
 {
   const now = Date.now()
   const oldToken = token(now - HOUR, now + HOUR)
@@ -467,7 +447,7 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
     // Busy is not a credential verdict: the renewal stands, marked unverified.
     const busy = await renewer.ensureFresh('manual')
     assert.equal(busy.renewed, true, 'a rate-limiting gateway does not fail the renewal')
-    assert.equal(probes, 3, 'the busy gateway is asked again before its answer stands')
+    assert.equal(probes, 3, 'all three models get a chance to verify the token')
     assert.match(String(busy.message), /rate-limiting/u, 'the result says the token was not verified first')
     assert.equal(h.values.TSINGHUA_API_KEY, newToken)
     assert.equal(renewer.transportSnapshot().cookie, 'sid=new')
@@ -537,9 +517,63 @@ const config = (overrides: Record<string, unknown> = {}): Record<string, unknown
   }
 }
 
-// A 5xx cannot decide the network location or activate an unverified token.
-// Identity/token changes, candidate expiry, and a decisive refusal must discard
-// a pending candidate rather than letting it overwrite newer private inputs.
+// An expired shared token can be renewed while the preferred model is down.
+for (const healthyModel of ['qwen3.8-27b', 'DeepSeek-R1-W8A8'] as const) {
+  const now = Date.now()
+  const expired = token(now - 2 * HOUR, now - HOUR)
+  const fresh = token(now, now + 24 * HOUR)
+  const h = harness({
+    values: { TSINGHUA_API_KEY: expired, MADMODEL_USERNAME: 'fixture-id', MADMODEL_PASSWORD: 'fixture-password' },
+  })
+  const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true, mode: 'webvpn' } })))
+  const chain = loadAuth().MadmodelAuthClient.prototype
+  const originalLogin = chain.getMadModelToken
+  const originalFetch = globalThis.fetch
+  const requested: string[] = []
+  let logins = 0
+  let waitingProbeCancelled = false
+  try {
+    chain.getMadModelToken = async () => {
+      logins += 1
+      return { token: fresh, expiresAt: now + 24 * HOUR, cookie: 'sid=fresh' }
+    }
+    globalThis.fetch = async (_url, init) => {
+      const { model } = JSON.parse(String(init?.body)) as { model: string }
+      requested.push(model)
+      if (model === healthyModel) {
+        return Response.json({ choices: [{ message: { content: 'ok' } }] })
+      }
+      if (healthyModel === 'DeepSeek-R1-W8A8' && model === 'DeepSeek-V4.1-Flash') {
+        const signal = init?.signal
+        assert.ok(signal)
+        return await new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            waitingProbeCancelled = true
+            reject(signal.reason)
+          }, { once: true })
+        })
+      }
+      return new Response('upstream_unreachable', { status: 502 })
+    }
+    await renewer.tick()
+    assert.equal(logins, 1)
+    assert.equal(requested[0], 'DeepSeek-V4.1-Flash')
+    assert.ok(requested.includes(healthyModel), 'the healthy model can verify the candidate')
+    assert.equal(h.values.TSINGHUA_API_KEY, fresh, 'the expired credential is replaced')
+    assert.equal(renewer.transportSnapshot().cookie, 'sid=fresh')
+    assert.equal(renewer.snapshot().phase, 'ok')
+    if (healthyModel === 'DeepSeek-R1-W8A8') {
+      assert.ok(waitingProbeCancelled, 'a silent Flash probe is canceled as soon as another model succeeds')
+    }
+  } finally {
+    chain.getMadModelToken = originalLogin
+    globalThis.fetch = originalFetch
+    renewer.stop()
+    for (const dispose of h.disposers.reverse()) dispose()
+  }
+}
+
+// Pending candidates follow credential changes, cancellation and expiry.
 for (const change of ['scheduled', 'identity', 'token', 'expiry', 'rejected', 'concurrent-token', 'concurrent-identity', 'stopped', 'aborted', 'expires-during-probe'] as const) {
   const now = Date.now()
   const old = token(now - HOUR, now + 3 * HOUR)
@@ -573,6 +607,7 @@ for (const change of ['scheduled', 'identity', 'token', 'expiry', 'rejected', 'c
     }
     const deferred = await renewer.ensureFresh('manual')
     assert.equal(deferred.code, 'VERIFICATION_PENDING')
+    const failedProbes = probes
     assert.equal(h.values.TSINGHUA_API_KEY, old)
     assert.equal(renewer.transportSnapshot().cookie, '')
     assert.ok(!JSON.stringify(renewer.snapshot()).includes(candidate), 'candidate secrets stay out of public status')
@@ -582,14 +617,14 @@ for (const change of ['scheduled', 'identity', 'token', 'expiry', 'rejected', 'c
       Date.now = () => retryTime
       await renewer.tick()
       assert.equal(logins, 1, 'the scheduled retry validates without signing in again')
-      assert.equal(probes, 2)
+      assert.equal(probes, failedProbes + 1)
       assert.equal(h.values.TSINGHUA_API_KEY, candidate)
     } else if (change === 'token') {
       h.values.TSINGHUA_API_KEY = fresh
       Date.now = () => now + 3 * MINUTE
       await renewer.tick()
       assert.equal(logins, 1)
-      assert.equal(probes, 1, 'an external replacement invalidates the candidate')
+      assert.equal(probes, failedProbes, 'an external replacement invalidates the candidate')
       assert.equal(h.values.TSINGHUA_API_KEY, fresh)
       assert.equal(renewer.snapshot().lastCode, null)
     } else if (change === 'stopped' || change === 'aborted' || change === 'expires-during-probe') {
@@ -643,11 +678,7 @@ for (const change of ['scheduled', 'identity', 'token', 'expiry', 'rejected', 'c
   } finally { globalThis.fetch = originalFetch }
 }
 
-// A login that minted no new token still opened a session, and off campus that
-// session is the only thing that makes the gateway answer. Keeping the old
-// token and adopting the new cookie are separate decisions: discarding the
-// cookie here is how the WebVPN transport could never come up — a token that
-// was not due yet meant "no progress", and the working session went with it.
+// Token renewal and tunnel session adoption are independent outcomes.
 {
   const now = Date.now()
   const sameToken = token(now - HOUR, now + 3 * HOUR)
@@ -684,10 +715,7 @@ for (const change of ['scheduled', 'identity', 'token', 'expiry', 'rejected', 'c
   }
 }
 
-// The loopback transport asks the renewal owner to make itself usable after the
-// school's gate refused a request. The answer must come from evidence: the
-// network probe decides which path requests take, and a stored tunnel session is
-// verified before a login is spent on it.
+// Network detection and tunnel validation select the recovery path.
 {
   const now = Date.now()
   const live = token(now - HOUR, now + 20 * HOUR)
@@ -761,9 +789,70 @@ for (const change of ['scheduled', 'identity', 'token', 'expiry', 'rejected', 'c
   }
 }
 
+// The first request and requests after an idle period select their route locally.
+{
+  const originalNow = Date.now
+  const originalFetch = globalThis.fetch
+  const h = harness()
+  const renewer = new Renewer(h.ctx, resolveOptions(config({ transport: { enabled: true } })))
+  let now = Date.now()
+  let calls = 0
+  let pending = Promise.withResolvers<Response>()
+  try {
+    Date.now = () => now
+    globalThis.fetch = () => {
+      calls += 1
+      return pending.promise
+    }
+    const warmup = renewer.detectTransport()
+    assert.equal(renewer.transportForRequest(), 'direct', 'the first request can use campus direct before the probe finishes')
+    assert.equal(calls, 1, 'the request does not start a probe')
+    pending.resolve(new Response('campus', { status: 200 }))
+    assert.equal(await warmup, 'direct')
+    now += MINUTE + 1
+    pending = Promise.withResolvers<Response>()
+    await renewer.tick()
+    assert.equal(renewer.transportForRequest(), 'direct')
+    assert.equal(renewer.transportForRequest(), 'direct')
+    assert.equal(calls, 2, 'the tick refreshes the route once in the background')
+    const detected = renewer.detectTransport(true)
+    pending.resolve(new Response(null, { status: 302 }))
+    assert.equal(await detected, 'webvpn', 'forced recovery can await the fresh result')
+    assert.equal(calls, 2, 'forced recovery shares the pending refresh')
+    assert.equal(renewer.transportForRequest(), 'webvpn')
+  } finally {
+    pending.resolve(new Response(null, { status: 503 }))
+    globalThis.fetch = originalFetch
+    Date.now = originalNow
+    renewer.stop()
+    for (const dispose of h.disposers.reverse()) dispose()
+  }
+}
+
+// The DSH adapter marks title requests only on this plugin's local route.
+{
+  const h = harness()
+  Object.defineProperty(h.ctx, 'effect', { value: () => () => {} })
+  apply(h.ctx, config({ transport: { enabled: true } }))
+  const prepare = h.listeners.get('llm-pi-ai/request-headers')
+  assert.ok(prepare)
+  const headers = new Headers()
+  const request = { provider: 'tsinghua', baseURL: 'http://127.0.0.1:43110/v1' }
+  const decorated = prepare({ ...request, purpose: 'session-title' }, headers, () => headers) as Headers
+  assert.equal(decorated.get(TITLE_REQUEST_HEADER), '1')
+  assert.equal(headers.get(TITLE_REQUEST_HEADER), null)
+  assert.equal(prepare(request, headers, () => headers), headers)
+  assert.equal(prepare({ ...request, baseURL: 'https://example.invalid/v1', purpose: 'session-title' },
+    headers, () => headers), headers)
+}
+
 // ── configuration validation ───────────────────────────────────────────────
 
 assert.throws(() => resolveOptions({ rules: RULES, autoRenew: 'yes' }), /autoRenew must be a boolean/u)
+assert.equal(resolveOptions({ rules: RULES }).transport.concurrency.max, 3)
+assert.equal(resolveOptions({ rules: RULES, transport: {
+  concurrency: { initial: 2, max: 3, min: 1, growAfter: 4, maxCooldownMs: 120_000 },
+} }).transport.concurrency.max, 3)
 assert.throws(() => resolveOptions({ rules: RULES, twoFactorTimeoutMs: 0 }), /twoFactorTimeoutMs must be positive/u)
 assert.throws(() => resolveOptions({ rules: RULES, verifyModel: '' }), /verifyModel must not be empty/u)
 assert.equal(resolveOptions({ rules: RULES }).renew.verifyAfterRenew, true)

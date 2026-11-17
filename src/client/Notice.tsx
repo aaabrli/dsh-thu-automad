@@ -1,16 +1,4 @@
-/**
- * Frame-wide notice for a credential the user still has to act on.
- *
- * It rides the shell's additive overlay seat, which floats above every column
- * and stays click-through except for this element. A notice appears only once
- * the state needs action, is dismissible, and re-arms itself when the state
- * changes — so acting on it, or a further decay, brings it back rather than
- * leaving a stale acknowledgement in place.
- *
- * A renewal that is in flight deliberately produces no notice: the plugin is
- * already doing the thing, and telling the user to do it would be wrong.
- * @module dsh-thu-automad/client/Notice
- */
+/** Show credential actions in the application overlay. */
 
 import { memo, useEffect, useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'

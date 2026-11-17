@@ -1,18 +1,4 @@
-/**
- * Paint this plugin's glyph into its own Settings navigation button.
- *
- * The Settings sidebar is owned by the shell: every plugin's category is a
- * plain `<button>` with a generic gear glyph, and the shell does not read a
- * package icon for that seat. The neighbouring plugins solve it the same way:
- * mark the button whose text is this plugin's category label and let CSS replace
- * the glyph inside it with a mask of the plugin's own SVG. The mask paints with
- * `currentColor`, so the icon follows the theme and the shell's hover/selected
- * colors without shipping a second artwork.
- *
- * The dialog is destroyed and rebuilt between openings, so the marker is
- * re-applied by a MutationObserver rather than only once at mount.
- * @module dsh-thu-automad/client/settings-icon
- */
+/** Apply the plugin icon to its settings navigation entry. */
 
 /** Attribute the stylesheet keys on; unique to this plugin. */
 const MARK = 'thu-automad'

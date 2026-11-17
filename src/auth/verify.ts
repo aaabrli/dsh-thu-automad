@@ -1,17 +1,8 @@
-/**
- * Prove that a token the gateway issued is a token the gateway accepts.
- *
- * Issuance and acceptance are different facts. The school's endpoint hands out
- * a JWT on a successful ticket redemption, but the upstream model API is what
- * decides whether that JWT is usable. A permission refusal can also arrive as
- * a business error with HTTP 200.
- *
- * Ask for a single token using the same streaming path as a chat. Either a
- * valid SSE chunk or a normal JSON completion proves the candidate works.
- * @module dsh-thu-automad/auth/verify
- */
+/** Check network reachability and verify campus tokens with the model gateway. */
 
+import { setTimeout as delay } from 'node:timers/promises'
 import { SITE } from './chain.ts'
+import { KNOWN_MODELS } from '../transport/concurrency.ts'
 
 /** The gateway's HTTP 200 response for denied permission. */
 const PERMISSION_DENIED = 10003
@@ -69,18 +60,7 @@ export type SiteReachability =
   /** The probe could not decide; a transport failure is not a location. */
   | 'unknown'
 
-/**
- * Ask the direct host whether this process can reach the gateway without the
- * WebVPN tunnel.
- *
- * The school's load balancer answers a campus request with the application
- * itself and an off-campus request with a redirect into the unified-auth OAuth
- * form, so the status of one unauthenticated GET separates the two networks
- * without touching credentials. A transport failure stays `unknown` rather than
- * guessing, because a flaky moment should not flip a working transport.
- * @param timeoutMs - probe budget; the site answers quickly when it answers.
- * @returns where this process appears to be, or that the probe could not tell.
- */
+/** Ask the direct host whether this process can reach the gateway without the WebVPN tunnel. */
 export async function probeDirectSite(timeoutMs = 8_000): Promise<SiteReachability> {
   let response: Response
   try {
@@ -92,7 +72,7 @@ export async function probeDirectSite(timeoutMs = 8_000): Promise<SiteReachabili
   } catch (_unreachable) {
     return 'unknown'
   }
-  try { response.body?.cancel() } catch (_alreadyClosed) { /* nothing left to release */ }
+  void response.body?.cancel().catch(() => {})
   if (response.status >= 300 && response.status < 400) return 'offcampus'
   if (response.status >= 500) return 'unknown'
   if (response.status >= 200) return 'campus'
@@ -107,22 +87,16 @@ export interface ProbeOptions {
   model: string
   /** Tunnel cookie header value, when the transport is the WebVPN tunnel. */
   cookie?: string
-  /** Whether to go through the tunnel rather than straight to the site. */
+  /** Verify through WebVPN. */
   tunnelMode?: boolean
   /** WebVPN prefix to prepend when `tunnelMode` is set. */
   tunnelPrefix?: string
   /** Budget for the whole request, in milliseconds. */
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
-/**
- * Ask the upstream whether it accepts a token.
- *
- * Only a decisive answer is reported: a transport failure is its own verdict,
- * never a claim that the credential is bad.
- * @param options - token, model, transport choice, and timeout.
- * @returns the classification.
- */
+/** Ask the upstream whether it accepts a token. */
 export async function probeUpstream(options: ProbeOptions): Promise<ProbeResult> {
   const { token, model, cookie = '', tunnelMode = false, tunnelPrefix = '', timeoutMs = 60_000 } = options
   const base = tunnelMode && tunnelPrefix !== '' ? `${tunnelPrefix}/v1` : `${SITE}/v1`
@@ -130,6 +104,7 @@ export async function probeUpstream(options: ProbeOptions): Promise<ProbeResult>
   const started = Date.now()
   let response: Response
   try {
+    const timeout = AbortSignal.timeout(timeoutMs)
     response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -145,7 +120,7 @@ export async function probeUpstream(options: ProbeOptions): Promise<ProbeResult>
         max_tokens: 1,
       }),
       redirect: 'manual',
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]),
     })
   } catch (_unreachable) {
     const elapsed = Date.now() - started
@@ -196,32 +171,43 @@ function probeMediaType(header: string | null): string {
   }
 }
 
-/** How many extra probes a busy gateway earns before its verdict stands. */
-const BUSY_RETRIES = 2
+/** Delay before starting the remaining model probes. */
+const FALLBACK_DELAY_MS = 750
 
-/** Wait before the second busy probe; doubled for the one after it. */
-const BUSY_DELAY_MS = 800
-
-/**
- * Ask the upstream whether it accepts a token, giving a busy gateway another try.
- *
- * A 429 is the gateway queueing, not a verdict on the credential: it counts
- * in-flight completions per account and turns the extras away. Treating the
- * first one as "this token is unproven" makes a renewal fail — and re-login —
- * exactly when the account is busiest, which is the opposite of what the queue
- * in the transport already does with a 429 it meets directly.
- * @param options - token, model, transport choice, and timeout.
- * @returns the last classification, which is a verdict rather than a queue state.
- */
-export async function probeUpstreamWithRetry(options: ProbeOptions): Promise<ProbeResult> {
-  let result = await probeUpstream(options)
-  for (let attempt = 1; attempt <= BUSY_RETRIES && result.verdict === 'rate-limited'; attempt += 1) {
-    await new Promise((resolve) => {
-      setTimeout(resolve, BUSY_DELAY_MS * attempt)
-    })
-    result = await probeUpstream(options)
+/** A completion from any model proves the shared credential works. */
+export async function verifyCampusToken(options: ProbeOptions): Promise<ProbeResult> {
+  const cancel = new AbortController()
+  const signal = options.signal === undefined
+    ? cancel.signal : AbortSignal.any([options.signal, cancel.signal])
+  const primary = probeUpstream({ ...options, signal })
+  const tryOtherModels = Promise.race([
+    primary.then(result => !result.ok),
+    delay(FALLBACK_DELAY_MS, true, { signal }).catch(() => false),
+  ])
+  const probes = [
+    primary,
+    ...KNOWN_MODELS.filter(model => model !== options.model).map(async model => {
+      if (!await tryOtherModels || signal.aborted) return undefined
+      return probeUpstream({ ...options, model, signal })
+    }),
+  ]
+  try {
+    return await Promise.any(probes.map(async probe => {
+      const result = await probe
+      if (result?.ok) return result
+      throw result
+    }))
+  } catch {
+    const results = await Promise.all(probes)
+    // If no model accepted the token, preserve the strongest gateway evidence.
+    for (const verdict of ['rejected', 'session', 'rate-limited', 'unavailable', 'network'] as const) {
+      const match = results.find(result => result?.verdict === verdict)
+      if (match !== undefined) return match
+    }
+    return await primary
+  } finally {
+    cancel.abort()
   }
-  return result
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

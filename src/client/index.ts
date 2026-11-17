@@ -1,17 +1,4 @@
-/**
- * Browser half of the Tsinghua MadModel automation plugin.
- *
- * It owns one polling controller and publishes it through four slot
- * registrations: a reading inside the status link the plugin itself declares, a
- * notice in the shell overlay, the two-factor dialog, and the credentials page
- * under Settings. All of them read the same source through the framework's
- * bound selector hook, so no component contains subscription machinery.
- *
- * The plugin talks to the Host only through its own exact routes, and writes
- * the student identity through the settings page's form. Nothing here can read
- * a stored secret: the Host never publishes one.
- * @module dsh-thu-automad/client
- */
+/** Register the status card, settings page and two-factor dialog. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -53,24 +40,17 @@ export function apply(ctx: Context): void {
 
   ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'thu-automad: dictionaries')
   ctx.effect(() => installStyles(), 'thu-automad: stylesheet')
-  // The Settings sidebar is shell-owned; this replaces its generic gear in this
-  // plugin's row with the plugin glyph. Guarded because the check harness has
-  // no DOM while the bundle still has to load there.
-  if (typeof MutationObserver !== 'undefined') {
-    ctx.effect(
-      () => installSettingsIcon([zh['settings.nav'], en['settings.nav']], iconSvg),
-      'thu-automad: settings glyph',
-    )
-  }
+  ctx.effect(
+    () => installSettingsIcon([zh['settings.nav'], en['settings.nav']], iconSvg),
+    'thu-automad: settings glyph',
+  )
   ctx.effect(() => controller.start(), 'thu-automad: status polling')
 
   // Bound after the dictionaries are registered; the thunk below is re-read on
   // every projection, which is how the nav label follows a locale change.
   const t = ctx.locale.bind(NS)
 
-  // The status link owns the pill and the navigation; this half contributes the
-  // reading rendered inside it, so the seat stays a real extension point a
-  // deployment can register into instead of taking a second dock seat.
+  // Register the token reading inside the status card button.
   ctx.slots.inject(STATUS_PILL_READING, () => ctx.slots.register({
     name: STATUS_PILL_READING,
     locale: NS,
@@ -104,8 +84,7 @@ export function apply(ctx: Context): void {
     inject: injected,
   }, Notice))
 
-  // A whole page rather than a General row: two credential fields, the renewal
-  // status they feed, and the manual trigger all belong to one subject.
+  // Register account and renewal controls as a settings page.
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'thu-automad',

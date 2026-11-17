@@ -1,66 +1,20 @@
-# Bundle patch layer: two rows are contributed here. The first loads this
-# package's Host entry as a plain Cordis plugin — the `dsh.client` declaration in
-# package.json makes the Web application load ./client as the browser half, so no
-# second row is needed. The second supplies the provider route this plugin exists
-# to keep authenticated, so installing the bundle is enough to make `tsinghua`
-# selectable without hand-writing a profile row.
-#
-# Installed into a profile, the bare package name resolves from the profile's
-# own node_modules. Developing from a checkout, use dev.overlay.yml instead,
-# whose row names the absolute source path.
-#
-# The rule list below is the one this plugin exists to make expressible: a
-# credential refusal is no longer terminal, because `renew` re-authenticates and
-# retries; the gateway's other failure modes still ask.
-#
-# Nothing is remembered between failures: every one walks these rules again, so
-# a long outage asks each time instead of switching the model on its own.
 - insert:
     - id: thu-automad
       name: dsh-thu-automad
       config:
-        # The credential the provider reads, and the one renewal replaces.
         credentialRef: TSINGHUA_API_KEY
         label: 清华 DeepSeek
-        # Amber 30 minutes before expiry; renew an hour before, so an ordinary
-        # cycle never paints the pill amber on its way to green.
         warnBeforeMs: 1800000
         refreshAheadMs: 3600000
-        # Where the identity an unattended renewal signs in with is stored.
-        # Both are filled in from 设置 → 清华 MadModel.
         usernameRef: MADMODEL_USERNAME
         passwordRef: MADMODEL_PASSWORD
-        # 本地传输层：provider 行指向它，插件按网络选择直连或 WebVPN 隧道。
-        # keepaliveMs 让隧道会话在 token 到期前一直活着（隧道空闲约 2 小时失效）。
-        # concurrency 是网关并发上限的准入控制：超出的请求在本地等待，
-        # 429 时暂停该模型后重试同一请求，不换模型、不结束这一轮。
-        # maxWaitMs: 0 表示不设插件侧的等待上限，等到有槽位或客户端放弃为止。
         transport:
           enabled: true
           mode: auto
           port: 43110
           keepaliveMs: 1200000
-          concurrency:
-            initial: 3
-            max: 3
-            # 网关按模型分别限并发（madmodel-proxy 2026-10-29 实测）：
-            # V4.1-Flash 3、Qwen 4、R1 1；混合 3+4+1=8 路可同时完成。
-            perModel:
-              qwen3.8-27b: 4
-              DeepSeek-R1-W8A8: 1
-            min: 1
-            growAfter: 4
-            queueLimit: 32
-            maxWaitMs: 0
-            heartbeatAfterMs: 20000
-            heartbeatMs: 15000
-            cooldownMs: 5000
-            maxCooldownMs: 120000
-        # 兼容旧字段：仅用于“续期后校验”强制走隧道；新传输层会按实际通道自动选择。
         tunnel: false
         rules:
-          # A credential the gateway refuses is exactly what renewal is for:
-          # sign in again, and retry with the new token if that worked.
           - when: { provider: [ tsinghua ], code: [ AUTH ] }
             action: renew
             onFailure: ask
@@ -75,9 +29,7 @@
                   }
                 - { label: "这次放弃", action: fail }
               timeoutMs: 120000
-              # A delegated child has no human answerer and would wait forever.
               unavailable: { label: "放弃这一轮", action: fail }
-          # 工具调用被截断：先让 llm-retry 自己扛满预算，用尽后才问人。
           - when: { provider: [ tsinghua ], code: [ PI_AI_ERROR ] }
             action: ask
             afterRetries: 5
@@ -93,7 +45,6 @@
                 - { label: "这次放弃", action: fail }
               timeoutMs: 120000
               unavailable: { label: "放弃这一轮", action: fail }
-          # 另外两种形态：nginx 回 502，或流刚打开就断（零产出）。
           - when: { provider: [ tsinghua ], code: [ SERVER, TRANSPORT ] }
             action: ask
             ask:
@@ -107,48 +58,22 @@
                   }
                 - { label: "这次放弃", action: fail }
               timeoutMs: 120000
-              # 无人应答时不静默切走：deepseek-official 由基础 bundle 提供，但它要
-              # DEEPSEEK_API_KEY，纯清华用户没有；自动切过去只会把一次网关故障换成
-              # 一条 MISSING_CREDENTIAL。停下来比换到一个没有凭据的路由好排查。
               unavailable: { label: "放弃这一轮", action: fail }
 
-# 这个 bundle 存在的理由就是让 `tsinghua` 这条路由一直有凭据可用，所以路由本身
-# 也由这一层提供：装上 bundle 就有一个可选的 tsinghua，不必再手写 profile 行。
-#
-# 覆盖语义是**整行替换 config**（不是深合并），所以下面必须写出完整的 providers
-# 字典。基础 bundle 里 `llm-pi-ai` 那一行本来就没有 config（它以 dormant 姿态挂载，
-# 等 composition 或用户设置提供 profiles），因此这一层不覆盖掉任何东西。
-#
-# 层序仍然由用户掌握：profile 自己的 cordis.patch.yml 在 bundle 层之后应用，会整体
-# 替换这里的 config；llm-pi-ai 的用户设置层（模型设置页写的那个）再按 provider
-# 逐条合并。想彻底关掉这条路由，在自己的 patch 里写
-# `- { id: llm-pi-ai, config: { providers: {} } }` 即可。
 - id: llm-pi-ai
   config:
     providers:
       tsinghua:
         displayName: 清华 DeepSeek
-        # 与上面 thu-automad 的 credentialRef 是同一个引用：provider 每请求从
-        # credentials seam 解析它，续期把新 token 写回同一个引用，两边自动接上。
         apiKeyEnv: TSINGHUA_API_KEY
         api: openai-completions
-        # 只决定模型请求的落点：本插件的本地传输层，而不是直连网关。
-        # 本地层按网络选择校园直连或 WebVPN 隧道（校外必须走隧道），并把
-        # 当前 token 与隧道 cookie 注入每个请求。端口需与上面 transport.port 一致。
         baseURL: http://127.0.0.1:43110/v1
-        # 排队等待期间客户端不能先超时：
-        # - timeoutMs 是 pi-ai/SDK 的单请求总预算（默认 10 分钟）
-        # - streamIdleTimeoutMs 是“多久没有新 chunk 算卡死”（默认 5 分钟）
-        # 两者都放到 1 小时，让“等一个槽位再继续”真正成立；如嫌太久可调小。
         timeoutMs: 3600000
         streamIdleTimeoutMs: 3600000
         compat:
           supportsDeveloperRole: false
           maxTokensField: max_tokens
         reasoning: high
-        # PI_AI_ERROR 是网关把 tool call 参数截断时 pi-ai 的兜底码。上面那条
-        # `afterRetries: 5` 规则的前提就是 llm-retry 会重试它，所以这里必须留着；
-        # 少了它，规则会在第一次失败就把问题推给人。
         retryPolicy:
           mode: normal
           maxRetries: 5

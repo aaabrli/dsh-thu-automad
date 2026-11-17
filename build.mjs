@@ -1,20 +1,4 @@
-/**
- * Local build for this fork.
- *
- * Upstream builds with `tsdown` from inside the dsh monorepo, where the harness
- * packages and dev dependencies are already installed. This fork lives in its
- * own directory, so it reproduces the two build faces with esbuild instead:
- *
- * - Host: one ESM Node module, `lib/index.js`. Harness packages are type-only
- *   imports and therefore erased; the vendored authentication chain stays a
- *   runtime `require` of a file next to the built artifact, so it is never
- *   inlined and its global-shim load order is preserved.
- * - Client: one CommonJS bundle wrapped in the module-table factory the Web
- *   client expects, `lib/client.js`. React and every `@deepseek-ai/*` specifier
- *   stay `require(...)` calls resolved by that table.
- *
- * Build: `node build.mjs` (requires esbuild in `node_modules`).
- */
+/** Build the Node host module and the DSH browser module factory. */
 import { build } from 'esbuild'
 
 /** Package id the browser module table keys this bundle by. */

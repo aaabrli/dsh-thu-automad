@@ -1,12 +1,4 @@
-/**
- * Localized copy for the renewal's failure codes.
- *
- * The status document carries a stable code plus whatever diagnostic the Host
- * captured; both the settings page and the composer popover have to turn that
- * into one sentence, and they must not disagree. The mapping lives here so the
- * two surfaces share it instead of drifting.
- * @module dsh-thu-automad/client/renew-copy
- */
+/** Translate renewal results for the settings page and status card. */
 
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { NS } from './locale.ts'

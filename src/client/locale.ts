@@ -1,12 +1,4 @@
-/**
- * Locale namespace and dictionaries for this plugin's browser half.
- *
- * Every user-visible string lives here; the components receive only the typed
- * `t` seat, which is how the Web client keeps copy out of render code. The Host
- * publishes stable codes rather than prose, so a diagnostic the renewal reports
- * is rendered from a key here and its raw text is shown only as a detail line.
- * @module dsh-thu-automad/client/locale
- */
+/** English and Chinese UI messages. */
 
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 
@@ -97,13 +89,14 @@ export const en = {
   'settings.renew.detail': 'Reported: {message}',
   'settings.queue.empty': 'No model request is in flight right now',
   'settings.queue.running': '{inFlight} of {limit} running · {queued} queued',
-  'settings.queue.shrunk': 'current cap {limit}',
   'settings.queue.normal': 'idle',
   'settings.queue.active': 'running',
   'settings.queue.networkError': 'Upstream connection failed',
   'settings.queue.upstreamError': 'Upstream service error (HTTP {status})',
   'settings.queue.waiting': 'queued',
   'settings.queue.cooldown': '429 cooldown {remaining}',
+  'settings.queue.recovering': 'Checking capacity',
+  'settings.queue.starting': 'Awaiting data · {count}',
   'settings.queue.limit': 'Up to {limit} requests may wait; the plugin sets no maximum wait time.',
   'settings.queue.control': 'Queue waiting',
   'settings.queue.actionsHint': 'Pause admission or reset the transport if the queue looks stuck.',
@@ -193,7 +186,7 @@ export const en = {
   'link.title': 'Open the Tsinghua MadModel status card',
   'link.loading': 'Reading status…',
   'link.cardQueue': '{running} running · {queued} queued',
-  'pill.upstreamError': '{label} upstream error',
+  'link.modelUnavailable': 'Upstream error',
   'link.cardRemaining': 'left',
 } as const
 
@@ -281,13 +274,14 @@ export const zh: Record<keyof typeof en, string> = {
   'settings.renew.detail': '原始信息：{message}',
   'settings.queue.empty': '当前没有进行中的模型请求',
   'settings.queue.running': '在跑 {inFlight}/{limit} · 排队 {queued}',
-  'settings.queue.shrunk': '当前限额 {limit}',
   'settings.queue.normal': '空闲',
   'settings.queue.active': '运行中',
   'settings.queue.networkError': '连接上游失败',
   'settings.queue.upstreamError': '上游服务异常（HTTP {status}）',
   'settings.queue.waiting': '排队中',
   'settings.queue.cooldown': '429 冷却 {remaining}',
+  'settings.queue.recovering': '确认槽位中',
+  'settings.queue.starting': '等首包 {count}',
   'settings.queue.limit': '最多 {limit} 条请求可以等待；插件本身不设最长等待时间。',
   'settings.queue.control': '排队等待',
   'settings.queue.actionsHint': '队列看起来卡住时，可以暂停准入或重置传输层。',
@@ -377,7 +371,7 @@ export const zh: Record<keyof typeof en, string> = {
   'link.title': '打开清华 MadModel 状态卡片',
   'link.loading': '正在读取状态…',
   'link.cardQueue': '{running} 在跑 · {queued} 排队',
-  'pill.upstreamError': '{label} 上游异常',
+  'link.modelUnavailable': '上游异常',
   'link.cardRemaining': '剩余',
 }
 

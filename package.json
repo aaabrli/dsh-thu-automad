@@ -1,9 +1,9 @@
 {
   "name": "dsh-thu-automad",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "displayName": "DSH-thu-automad",
   "icon": "icon.svg",
-  "description": "Tsinghua MadModel automation for the dsh Web UI: watch the campus token's JWT expiry, renew it unattended through the school's authentication chain (direct on campus, WebVPN tunnel off campus), and serve the model provider from a loopback transport.",
+  "description": "Tsinghua MadModel login, token renewal, streaming transport and per-model request queues for DSH.",
   "type": "module",
   "main": "lib/index.js",
   "types": "src/index.ts",

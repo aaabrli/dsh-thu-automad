@@ -1,27 +1,9 @@
-/**
- * The direct ticket path: password to JWT without the WebVPN layer.
- *
- * This is the chain `auth-probe/direct-login.js` validated against the live
- * school: password-login the DEEPSEEK application's SSO form through the
- * vendored library, read the ticket out of the success page, and redeem it at
- * the madmodel endpoint. The proxy this was reverse-engineered alongside
- * instead roams the info portal through a WebVPN session, but both routes
- * converge on the same `auth-login/check?ticket=` endpoint, and the direct one
- * needs no tunnel.
- *
- * The ticket is read from the response body first. Redeeming it needs the
- * ticket alone, so following the redirect the page advertises is a fallback
- * rather than a step — which also sidesteps the malformed redirect hosts the
- * school has been observed to emit.
- * @module dsh-thu-automad/auth/login
- */
+/** Sign in through campus SSO or WebVPN and redeem the session ticket. */
 
 import {
   CHECK_URL, FORM_URL, TICKET_CONSUMER, loadAuth,
 } from './chain.ts'
 import type { TwoFactorHandler, VendoredCookieJar } from './chain.ts'
-import { probeUpstreamWithRetry } from './verify.ts'
-import type { ProbeResult } from './verify.ts'
 
 /** Longest hop chain followed while hunting a ticket. */
 const MAX_HOPS = 12
@@ -44,8 +26,6 @@ export interface LoginOutcome {
   ticketSource: TicketSource
   /** Wall-clock duration of the login, in milliseconds. */
   durationMs: number
-  /** Upstream probe result, when verification was requested. */
-  probe?: ProbeResult
 }
 
 /** What one login attempt needs. */
@@ -58,13 +38,6 @@ export interface LoginRequest {
   fingerprint: string
   /** Two-factor answerer; without it the chain cannot offer the handshake. */
   handler?: TwoFactorHandler
-  /** Verify the redeemed token against the upstream before returning it. */
-  verify?: {
-    /** Model id the verification call names. */
-    model: string
-    /** Whether to verify through the WebVPN tunnel. */
-    tunnel: boolean
-  }
 }
 
 /**
@@ -91,9 +64,7 @@ export async function login(request: LoginRequest): Promise<LoginOutcome> {
   const body = String(identity.body ?? '')
   const redirect = String(identity.redirectUrl ?? '')
 
-  // The success page carries the ticket in a link. Take it from the body first:
-  // the endpoint only ever needs the ticket itself, so following the anchor
-  // would spend a hop and inherit whatever host form the school emitted.
+  // Read the ticket from the success page or its redirect.
   const fromBody = /[?&]ticket=([^"&'<>\s]+)/iu.exec(body)
   const fromRedirect = /[?&]ticket=([^"&#]+)/u.exec(redirect)
   let ticket: string | null = fromBody !== null
@@ -102,9 +73,7 @@ export async function login(request: LoginRequest): Promise<LoginOutcome> {
   let source: TicketSource = fromBody !== null ? 'body' : 'redirect'
 
   if (ticket === null) {
-    // Some success pages advertise a host with the path separator missing
-    // (`...edu.cnauthlogin/...`), which `new URL` reads as one host. Repairing
-    // that one form is cheaper than explaining the failure later.
+    // Normalize the missing slash in campus login redirect URLs.
     const repaired = redirect.replace(/^(https:\/\/[\w.-]+\.tsinghua\.edu\.cn)(?=[^/])/iu, '$1/')
     const chased = await chaseTicket(repaired, jar)
     ticket = chased
@@ -132,7 +101,7 @@ export async function login(request: LoginRequest): Promise<LoginOutcome> {
     throw new Error(`thu-automad: the ticket was refused at the token endpoint (HTTP ${String(response.status)}): ${message}`)
   }
 
-  const outcome: LoginOutcome = {
+  return {
     token,
     expiresAt: auth.jwtExpiresAt(token),
     cookie: jar.headerFor(auth.TUNNEL_COOKIE_SCOPE),
@@ -140,38 +109,13 @@ export async function login(request: LoginRequest): Promise<LoginOutcome> {
     durationMs: Date.now() - started,
   }
 
-  if (request.verify !== undefined) {
-    outcome.probe = await probeUpstreamWithRetry({
-      token,
-      model: request.verify.model,
-      cookie: outcome.cookie,
-      tunnelMode: request.verify.tunnel,
-      tunnelPrefix: auth.MADMODEL_VPN_PREFIX,
-    })
-  }
-  return outcome
 }
 
-/**
- * Run the off-campus login chain: WebVPN session, info-portal roaming, and
- * ticket redemption on the tunneled madmodel path.
- *
- * The direct chain above only works while the request reaches the gateway from
- * a campus address. Off campus the school redirects the direct host name into
- * the unified-auth OAuth form, so both the ticket redemption and later model
- * requests need the WebVPN tunnel; this function is that path. It returns the
- * tunnel cookie alongside the token because the tunnel rejects a bare Bearer.
- * @param request - identity, fingerprint, two-factor answerer, and verify choice.
- * @returns the token, the tunnel cookie, and where the ticket came from.
- * @throws Error carrying the vendored chain's stable `code` when a step fails.
- */
+/** Run the off-campus login chain: WebVPN session, info-portal roaming, and ticket redemption on the tunneled madmodel path. */
 export async function loginViaWebVpn(request: LoginRequest): Promise<LoginOutcome> {
   const auth = loadAuth()
   const started = Date.now()
-  // The chain hangs off a client that owns the cookie jar the tunnel session
-  // lives in; the vendored entry exports the class, not a module-level
-  // `getMadModelToken`. Spelling it as a module call throws before the first
-  // request, which is exactly how this path was dead on arrival.
+  // The WebVPN client owns the tunnel cookie jar.
   const client = new auth.MadmodelAuthClient(new auth.CookieJar())
   const result = await client.getMadModelToken({
     username: request.username,
@@ -179,36 +123,16 @@ export async function loginViaWebVpn(request: LoginRequest): Promise<LoginOutcom
     fingerPrint: request.fingerprint,
     ...request.handler === undefined ? {} : { twoFactorHandler: request.handler },
   })
-  const outcome: LoginOutcome = {
+  return {
     token: result.token,
     expiresAt: result.expiresAt,
     cookie: result.cookie,
     ticketSource: 'webvpn',
     durationMs: Date.now() - started,
   }
-  if (request.verify !== undefined) {
-    // The token is only useful with the tunnel that issued it, so the probe
-    // always follows the tunnel even when the caller asked for direct.
-    outcome.probe = await probeUpstreamWithRetry({
-      token: outcome.token,
-      model: request.verify.model,
-      cookie: outcome.cookie,
-      tunnelMode: true,
-      tunnelPrefix: auth.MADMODEL_VPN_PREFIX,
-    })
-  }
-  return outcome
 }
 
-/**
- * Follow redirects until a ticket appears in one of the URLs.
- *
- * Every hop is checked against the vendored allowlist before it is requested,
- * so a compromised success page cannot send this process to a foreign host.
- * @param startUrl - repaired redirect the success page advertised.
- * @param jar - cookie jar shared with the login.
- * @returns the ticket, or null when no hop produced one.
- */
+/** Follow redirects until a ticket appears in one of the URLs. */
 async function chaseTicket(startUrl: string, jar: VendoredCookieJar): Promise<string | null> {
   const auth = loadAuth()
   let url = startUrl

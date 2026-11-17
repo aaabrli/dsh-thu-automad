@@ -1,18 +1,4 @@
-/**
- * Composer dock pill: this plugin's status, as a small popover card.
- *
- * The pill stays the same reading the {@link STATUS_PILL_READING} seat paints;
- * clicking it opens the compact summary.
- *
- * The card is laid out as a small instrument rather than a table: the remaining
- * lifetime is the figure the card exists to report, so it owns the one large
- * number, the two facts that rarely change sit quietly beside it, and the
- * bottom strip is the admission state of the gateway — one group per model, one
- * segment per slot that model is allowed. That strip is why the card is worth
- * opening at all: a single "3 running" total cannot say which model is
- * saturated.
- * @module dsh-thu-automad/client/StatusLink
- */
+/** Open the token and per-model status card from the composer. */
 
 import { memo, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -174,12 +160,7 @@ function Fact({ label, value, title }: { label: string; value: { text: string; t
   )
 }
 
-/**
- * Remaining share of the token's own lifetime, tinted by its state.
- *
- * The ratio comes from the two timestamps the Host publishes, never from the
- * countdown text, so a stalled poll cannot move the bar.
- */
+/** Remaining share of the token's own lifetime, tinted by its state. */
 function LifetimeBar({ token, tone }: { token: TokenStatus; tone: Tone }) {
   const { expiresAt, issuedAt } = token
   if (expiresAt === null || issuedAt === null || expiresAt <= issuedAt) return null
@@ -191,13 +172,7 @@ function LifetimeBar({ token, tone }: { token: TokenStatus; tone: Tone }) {
   )
 }
 
-/**
- * The renewal fact as one short value.
- *
- * A scheduled or completed renewal is a time; everything else is a state word,
- * because "下次" printed beside a 续期 label says it twice. Tone is what carries
- * the difference between routine and trouble.
- */
+/** The renewal fact as one short value. */
 function renewalFact(renew: RenewStatus, t: TranslateNS<typeof NS>): { text: string; tone: Tone } {
   if (renew.lastCode === 'VERIFICATION_PENDING') return { text: t('settings.renew.verificationPending'), tone: 'warn' }
   switch (renew.phase) {
@@ -212,43 +187,31 @@ function renewalFact(renew: RenewStatus, t: TranslateNS<typeof NS>): { text: str
   }
 }
 
-/**
- * The admission list: one row per model, against the gateway's own ceiling.
- *
- * The ceilings are per model (3 + 4 + 1 = 8 slots on the shipped configuration),
- * so one total hides which model is saturated — and a three-letter abbreviation
- * hides which model it is, which is the part a reader cannot verify. A row per
- * model fits the whole id, its slots and its queue without a legend.
- * @param transport - transport facts, absent while the loopback is starting.
- * @param t - locale seat.
- * @returns one row per known model.
- */
+/** The admission list shows the limit currently applied to each model. */
 function poolReadings(transport: TransportStatus | undefined, t: TranslateNS<typeof NS>): ReactNode {
   const pools = transport?.pools ?? []
   if (pools.length === 0) return <span className={css.poolCount}>—</span>
   return pools.map(pool => <PoolRow key={pool.model} pool={pool} t={t} />)
 }
 
-/**
- * One model's row: slots, count, queue, and — while the gateway has it paused —
- * how long the 429 cooldown has left. The countdown lives here rather than in
- * the parent so only a paused row keeps a timer alive.
- */
+/** Render one model's slot usage, queue and cooldown. */
 function PoolRow({ pool, t }: { pool: TransportPoolStatus; t: TranslateNS<typeof NS> }) {
   const cooldown = useCountdown(pool.pausedUntil)
-  // `ceiling` is optional on the wire; the admission limit is the same number
-  // on a profile that never ramps, so an older Host still renders a reading.
-  const ceiling = pool.ceiling ?? pool.limit
+  const { limit, starting = 0 } = pool
   const paused = pool.pausedUntil !== null && pool.pausedUntil > Date.now()
-  const full = ceiling > 0 && pool.inFlight >= ceiling
+  const full = limit > 0 && pool.inFlight >= limit
   const failure = poolFailureText(pool, t)
-  const tone: Tone = failure !== null || paused ? 'error' : full ? 'warn' : 'idle'
-  const slots = ceiling > 0 && ceiling <= MAX_SEGMENTS
-    ? Array.from({ length: ceiling }, (_unused, index) => index)
+  const tone: Tone = failure !== null || paused ? 'error' : full || pool.recovering === true ? 'warn' : 'idle'
+  const slots = limit > 0 && limit <= MAX_SEGMENTS
+    ? Array.from({ length: limit }, (_unused, index) => index)
     : []
   const counts = t('link.cardQueue', { running: String(pool.inFlight), queued: String(pool.queued) })
-  const detail = [failure, paused && cooldown !== null ? t('settings.queue.cooldown', { remaining: cooldown }) : null, counts]
-    .filter(value => value !== null).join(' · ')
+  const wait = paused && cooldown !== null
+    ? t('settings.queue.cooldown', { remaining: cooldown })
+    : pool.recovering === true ? t('settings.queue.recovering')
+      : starting > 0 ? t('settings.queue.starting', { count: String(starting) }) : null
+  const detail = [failure, wait, counts].filter(value => value !== null).join(' · ')
+  const modelStatus = failure === null ? wait : t('link.modelUnavailable')
   return (
     <span
       className={css.pool}
@@ -269,25 +232,16 @@ function PoolRow({ pool, t }: { pool: TransportPoolStatus; t: TranslateNS<typeof
             ))}
           </span>
         )}
-        <span className={css.poolCount} data-tone={tone}>{`${String(pool.inFlight)}/${String(ceiling)}`}</span>
+        <span className={css.poolCount} data-tone={tone}>{`${String(pool.inFlight)}/${String(limit)}`}</span>
       </span>
-      {paused && cooldown !== null
-        ? <span className={css.poolPaused}>{t('settings.queue.cooldown', { remaining: cooldown })}</span>
+      {modelStatus !== null
+        ? <span className={css.poolPaused} data-tone={paused || failure !== null ? 'error' : 'idle'}>{modelStatus}</span>
         : null}
     </span>
   )
 }
 
-/**
- * The Host's explanation for the last failed renewal, for the row's tooltip.
- *
- * The card only has room for a state word; the reason (and the Host's own
- * diagnostic when no code covers it) rides along in the title, so diagnosing a
- * failed renewal does not require opening the settings page.
- * @param renew - renewal state from the status document.
- * @param t - locale seat.
- * @returns the explanation, or undefined when the last attempt did not fail.
- */
+/** The Host's explanation for the last failed renewal, for the row's tooltip. */
 function renewalDetail(renew: RenewStatus, t: TranslateNS<typeof NS>): string | undefined {
   if (renew.lastCode === null) return undefined
   return renewFailureText(renew.lastCode, renew.lastMessage, t) ?? renew.lastMessage ?? renew.lastCode

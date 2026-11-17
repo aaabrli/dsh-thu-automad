@@ -1,27 +1,4 @@
-/**
- * The renewal schedule: decide when the stored token is about to stop working,
- * re-acquire one through the vendored authentication chain, and report honestly
- * what happened.
- *
- * Three rules shape this state machine.
- *
- * The clock comes from the token itself. The campus JWT states its own `exp`,
- * so the deadline is exact and free; the schedule is "renew this far ahead of
- * that instant", not "poll and hope".
- *
- * A rotation is only a rotation if the expiry moved. The school will happily
- * hand back the token that is already expiring, and reporting that as success
- * would leave the status page green and the model failing — so a token whose
- * expiry did not advance is `stalled`, which is a distinct outcome with its own
- * copy, not a failure and not a success.
- *
- * Only a human can unblock a two-factor challenge or a wrong password, and the
- * background loop must never wait on one: it parks the challenge where the Web
- * UI can answer it, and gives up on its own timeout. `needs-human` is therefore
- * a resting state the plugin stays in until either the dialog is answered or
- * the stored credentials are corrected.
- * @module dsh-thu-automad/renew
- */
+/** Schedule token renewal and manage the campus authentication session. */
 
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
@@ -29,13 +6,13 @@ import type {} from '@deepseek-ai/dsh-credentials'
 import { authErrorCode, isIdentityCode, isTwoFactorCode, loadAuth } from './auth/chain.ts'
 import { login, loginViaWebVpn } from './auth/login.ts'
 import type { LoginOutcome } from './auth/login.ts'
-import { probeDirectSite, probeUpstreamWithRetry } from './auth/verify.ts'
+import { probeDirectSite, verifyCampusToken } from './auth/verify.ts'
 import type { ProbeVerdict } from './auth/verify.ts'
 import { SessionStore } from './auth/session.ts'
 import type { SessionFacts } from './auth/session.ts'
 import type { AutomadOptions } from './config.ts'
 import { readTokenTimes } from './jwt.ts'
-import type { RenewPhase, RenewStatus, TransportPoolStatus, TunnelVerdict } from './protocol.ts'
+import type { RenewPhase, RenewStatus, TunnelVerdict } from './protocol.ts'
 import type { EffectiveTransport } from './transport/proxy.ts'
 import { TwoFactorQueue } from './two-factor.ts'
 
@@ -92,7 +69,7 @@ export class Renewer {
   private noProgress = false
   private failures = 0
   private inFlight: Promise<RenewOutcome> | undefined
-  private stopped = false
+  private readonly lifetime = new AbortController()
   private lastRenewedAt: number | null = null
   private pending: PendingVerification | undefined
   private facts: SessionFacts = {
@@ -111,6 +88,7 @@ export class Renewer {
 
   /** When the direct host was last probed for reachability. */
   private modeProbedAt = 0
+  private modeProbe: Promise<EffectiveTransport> | undefined
 
   /** When the tunnel was last kept alive, or null. */
   private probeAt: number | null = null
@@ -123,9 +101,6 @@ export class Renewer {
 
   /** Why the loopback transport server is not listening, when it is not. */
   private proxyError: string | null = null
-
-  /** Per-model admission state the loopback server last reported. */
-  private proxyPools: TransportPoolStatus[] = []
 
   /** Questions the login chain parks here for the Web UI. */
   readonly twoFactor: TwoFactorQueue
@@ -159,17 +134,10 @@ export class Renewer {
     }
   }
 
-  /**
-   * Evaluate the deadline and renew when it is close enough.
-   *
-   * Called on a fixed tick rather than scheduled at one instant, because the
-   * token can change underneath the schedule — a manual paste, another
-   * process's renewal — and re-reading one JWT is cheaper than tracking every
-   * way it could move.
-   * @returns a promise settling once the evaluation finished.
-   */
+  /** Evaluate the deadline and renew when it is close enough. */
   async tick(): Promise<void> {
-    if (this.stopped) return
+    if (this.lifetime.signal.aborted) return
+    if (this.options.transport.enabled) void this.detectTransport()
     if (!this.enabled) {
       this.phase = 'off'
       this.nextAttemptAt = null
@@ -209,17 +177,7 @@ export class Renewer {
     await this.ensureFresh('schedule')
   }
 
-  /**
-   * Renew once, reusing an attempt already in flight.
-   *
-   * Two callers wanting a fresh token at the same moment must produce one
-   * login, not two: the school allows one attempt per identity, and a second
-   * concurrent login would either duplicate the fingerprint's registration or
-   * fail against the first.
-   * @param reason - why the renewal was requested.
-   * @param signal - caller cancellation; abandons any parked two-factor question.
-   * @returns what the attempt concluded.
-   */
+  /** Renew once, reusing an attempt already in flight. */
   async ensureFresh(reason: RenewReason, signal?: AbortSignal): Promise<RenewOutcome> {
     if (this.isCancelled(signal)) return cancelledOutcome()
     if (this.inFlight !== undefined) return await this.inFlight
@@ -227,10 +185,7 @@ export class Renewer {
       && this.retryAt !== null && Date.now() < this.retryAt) {
       return { renewed: false, code: this.lastCode, message: this.lastMessage }
     }
-    // A renewal that just succeeded is the answer to the failure that asked for
-    // it, so a second failure of the same request must not buy a second login.
-    // The retry owner grants a bounded number of attempts, and without this each
-    // one would re-run the whole authentication chain against the school.
+    // Concurrent request failures share the most recent renewal.
     if (reason !== 'manual' && this.lastRenewedAt !== null
       && Date.now() - this.lastRenewedAt < this.options.renew.checkIntervalMs) {
       return {
@@ -248,18 +203,13 @@ export class Renewer {
     }
   }
 
-  /**
-   * Forget the current retry delay so the next evaluation runs now.
-   *
-   * Used by the manual trigger: a person who just corrected a password must not
-   * wait out a backoff earned by the previous failure.
-   */
+  /** Forget the current retry delay so the next evaluation runs now. */
   clearBackoff(): void {
     this.retryAt = null
   }
 
   private isCancelled(signal?: AbortSignal): boolean {
-    return this.stopped || signal?.aborted === true
+    return this.lifetime.signal.aborted || signal?.aborted === true
   }
 
   private cancelAttempt(): RenewOutcome {
@@ -274,7 +224,7 @@ export class Renewer {
 
   /** Abandon any parked question and stop scheduling. */
   stop(): void {
-    this.stopped = true
+    this.lifetime.abort()
     this.pending = undefined
     this.twoFactor.cancel()
   }
@@ -285,8 +235,8 @@ export class Renewer {
    */
   snapshot(): RenewStatus {
     return {
-      enabled: this.enabled && !this.stopped,
-      phase: this.stopped ? 'off' : this.phase,
+      enabled: this.enabled && !this.lifetime.signal.aborted,
+      phase: this.lifetime.signal.aborted ? 'off' : this.phase,
       lastAttemptAt: this.lastAttemptAt,
       nextAttemptAt: this.nextAttemptAt,
       lastCode: this.lastCode,
@@ -312,7 +262,6 @@ export class Renewer {
     probeVerdict: TunnelVerdict | null
     listening: boolean
     lastError: string | null
-    pools: TransportPoolStatus[]
   } {
     return {
       mode: this.options.transport.mode,
@@ -325,29 +274,16 @@ export class Renewer {
       probeVerdict: this.probeVerdict,
       listening: this.proxyListening,
       lastError: this.proxyError,
-      pools: this.proxyPools,
     }
   }
 
   /** Record the loopback server's own state, for the status document. */
-  noteProxy(state: { listening: boolean; lastError: string | null; pools?: TransportPoolStatus[] }): void {
+  noteProxy(state: { listening: boolean; lastError: string | null }): void {
     this.proxyListening = state.listening
     this.proxyError = state.lastError
-    if (state.pools !== undefined) this.proxyPools = state.pools
   }
 
-  /**
-   * Decide which upstream requests must use.
-   *
-   * A pinned mode is returned as configured. `auto` asks the direct host: the
-   * school answers a campus request with the application and an off-campus
-   * request with a redirect into the unified-auth form, so one unauthenticated
-   * GET separates the two. The decision is cached for a few minutes because a
-   * per-request probe would double every call's latency, and re-probed on
-   * demand after a failure that suggests the network changed.
-   * @param force - probe even when the cached decision is still fresh.
-   * @returns the transport the caller should use.
-   */
+  /** Decide which upstream requests must use. */
   async detectTransport(force = false): Promise<EffectiveTransport> {
     if (!this.options.transport.enabled || this.options.transport.mode === 'direct') {
       this.mode = 'direct'
@@ -357,19 +293,24 @@ export class Renewer {
       this.mode = 'webvpn'
       return this.mode
     }
-    const now = Date.now()
-    if (!force && this.mode !== 'unknown' && now - this.modeProbedAt < MODE_PROBE_INTERVAL_MS) {
-      return this.mode
+    if (!force && Date.now() - this.modeProbedAt < MODE_PROBE_INTERVAL_MS) {
+      return this.mode === 'unknown' ? 'direct' : this.mode
     }
-    const reachability = await probeDirectSite()
-    if (reachability === 'campus') this.mode = 'direct'
-    else if (reachability === 'offcampus') this.mode = 'webvpn'
-    this.modeProbedAt = now
-    // An undecided probe (transport failure) keeps the previous decision; on
-    // the very first call there is none, and direct is the conservative guess
-    // because it is what this plugin did before the tunnel existed.
-    if (this.mode === 'unknown') return 'direct'
-    return this.mode
+    if (this.modeProbe !== undefined) return this.modeProbe
+    this.modeProbe = probeDirectSite().then(reachability => {
+      if (reachability === 'campus') this.mode = 'direct'
+      else if (reachability === 'offcampus') this.mode = 'webvpn'
+      this.modeProbedAt = Date.now()
+      return this.mode === 'unknown' ? 'direct' : this.mode
+    }).finally(() => { this.modeProbe = undefined })
+    return this.modeProbe
+  }
+
+  /** Select a route locally, including on the very first request after startup. */
+  transportForRequest(): EffectiveTransport {
+    const configured = this.options.transport.mode
+    if (configured !== 'auto') return configured
+    return this.mode === 'webvpn' ? 'webvpn' : 'direct'
   }
 
   /**
@@ -384,26 +325,7 @@ export class Renewer {
     return this.cookie !== ''
   }
 
-  /**
-   * Make the transport usable for the network this process is on now.
-   *
-   * This is what the loopback transport asks for after the school's gate has
-   * refused a request. Two things are decided here, not guessed:
-   *
-   * The network decision is forced, because the gate just contradicted the
-   * cached one — a Wi-Fi switch is exactly when that cache is wrong. On the
-   * campus path the token already in hand is all a request needs, so returning
-   * to campus recovers without touching the school at all.
-   *
-   * Off campus a request is only as good as its tunnel session, and a cookie can
-   * outlive the session it belongs to. So the stored session is *verified*
-   * rather than assumed: a live one needs no repair, an expired one must be
-   * discarded before the login replaces it, and a probe that could not reach the
-   * tunnel says nothing either way — the login is the only thing that can
-   * improve that state, and a login that fails leaves the old cookie untouched,
-   * so unreliable evidence never costs the current session.
-   * @returns whether a usable transport now exists.
-   */
+  /** Resolve the current route and restore its tunnel session. */
   async ensureTransport(): Promise<boolean> {
     const mode = await this.detectTransport(true)
     if (mode !== 'webvpn') return true
@@ -414,17 +336,9 @@ export class Renewer {
     return this.cookie !== ''
   }
 
-  /**
-   * Keep the WebVPN tunnel alive between token renewals.
-   *
-   * The tunnel drops an idle session after roughly two hours, which is shorter
-   * than the token's own lifetime, so a token still inside its window would
-   * otherwise stop working with no renewal due. An invalid verdict discards the
-   * cookie and re-runs the chain; a network failure changes nothing.
-   * @returns a promise settling once the probe and any repair finished.
-   */
+  /** Keep the WebVPN session active between token renewals. */
   async keepalive(): Promise<void> {
-    if (this.stopped) return
+    if (this.lifetime.signal.aborted) return
     const mode = await this.detectTransport()
     if (mode !== 'webvpn') return
     if (this.cookie === '') {
@@ -449,13 +363,7 @@ export class Renewer {
     return verdict
   }
 
-  /**
-   * Forget the stored tunnel session.
-   *
-   * Discarding before a login matters: the login replaces the cookie only on
-   * success, so a session the tunnel has already rejected would otherwise stay
-   * in place and keep answering the login page.
-   */
+  /** Clear an invalid stored WebVPN session. */
   private async discardTunnelSession(): Promise<void> {
     if (this.cookie === '' && this.facts.tunnelCookie === null) return
     this.cookie = ''
@@ -502,8 +410,7 @@ export class Renewer {
       && pending.outcome.expiresAt > now
       && (pending.outcome.ticketSource === 'webvpn') === (mode === 'webvpn')
     if (!reusable) this.pending = undefined
-    // An external replacement owns the schedule. A stale candidate must never
-    // overwrite it or force an unnecessary background login.
+    // Schedule from the active credential when it changes during verification.
     if (pending !== undefined && !reusable && reason === 'schedule'
       && previous !== null && previous - this.options.renew.refreshAheadMs > now) {
       this.phase = 'scheduled'
@@ -517,25 +424,9 @@ export class Renewer {
 
     let outcome: LoginOutcome
     try {
-      if (reusable) {
-        outcome = {
-          ...pending.outcome,
-          probe: await probeUpstreamWithRetry({
-            token: pending.outcome.token,
-            model: this.options.renew.verifyModel,
-            cookie: pending.outcome.cookie,
-            tunnelMode: mode === 'webvpn' || this.options.auth.tunnel,
-            tunnelPrefix: loadAuth().MADMODEL_VPN_PREFIX,
-          }),
-        }
-      } else {
-        outcome = await this.loginWith(mode, username, password, fingerprint)
-      }
+      outcome = reusable ? pending.outcome : await this.loginWith(mode, username, password, fingerprint)
     } catch (error) {
-      // `auto` can lose a race with a network change: the probe said campus but
-      // the gateway then answered with its unified-auth form. That is the one
-      // direct failure worth retrying through the tunnel, because the response
-      // is a login page rather than a refused credential.
+      // Retry through WebVPN when campus login reaches the SSO network gate.
       const retryThroughTunnel = mode === 'direct'
         && this.options.transport.enabled
         && this.options.transport.mode === 'auto'
@@ -556,9 +447,17 @@ export class Renewer {
 
     if (this.isCancelled(signal)) return this.cancelAttempt()
 
-    // Leave the active token and its session in place until the candidate is
-    // verified and has a later expiry.
-    const probe = outcome.probe
+    const probeSignal = signal === undefined ? this.lifetime.signal : AbortSignal.any([signal, this.lifetime.signal])
+    const probe = this.options.renew.verifyAfterRenew ? await verifyCampusToken({
+      token: outcome.token,
+      model: this.options.renew.verifyModel,
+      cookie: outcome.cookie,
+      tunnelMode: outcome.ticketSource === 'webvpn' || this.options.auth.tunnel,
+      tunnelPrefix: loadAuth().MADMODEL_VPN_PREFIX,
+      signal: probeSignal,
+    }) : undefined
+    if (this.isCancelled(signal)) return this.cancelAttempt()
+
     const busy = probe?.verdict === 'rate-limited'
     if (probe?.verdict === 'unavailable' || probe?.verdict === 'network') {
       this.pending = { outcome, credentialHash, identityHash, challengeMark }
@@ -567,11 +466,7 @@ export class Renewer {
       return result
     }
     this.pending = undefined
-    // A gateway that answered "wait" made no statement about the token. Failing
-    // the renewal over it would discard a token the school just minted and send
-    // the next tick through another full login — while the account is busy,
-    // which is the worst moment to add logins. Service failures retain a private
-    // candidate above; decisive refusals still block its activation.
+    // A busy gateway allows the newly issued token to be adopted.
     if (probe !== undefined && probe.verdict !== 'ok' && !busy) {
       return this.recordFailure(
         PROBE_FAILURE_CODES[probe.verdict], probe.detail ?? 'The new token could not be verified', false,
@@ -599,11 +494,7 @@ export class Renewer {
       this.lastMessage = 'the school returned the same token: its expiry did not advance, so nothing was renewed'
       this.retryAt = null
       this.nextAttemptAt = outcome.expiresAt
-      // Nothing was renewed, but a session was still opened: the tunnel cookie
-      // is not part of the token, and off campus it is the only thing that
-      // makes the gateway answer at all. Dropping it here is how the WebVPN
-      // path could never come up — a token that was not due yet meant "no
-      // progress", and the one working cookie went with it.
+      // Adopt the tunnel session even when token expiry is unchanged.
       await this.adoptTunnelSession(outcome)
       return { renewed: false, code: 'NO_PROGRESS', message: this.lastMessage }
     }
@@ -611,9 +502,7 @@ export class Renewer {
     try {
       await this.ctx.credentials.set(this.options.credentialRef, outcome.token)
     } catch (error) {
-      // The credential seam refuses a write its launching environment would
-      // shadow. That is a configuration fault, not a renewal failure, and the
-      // message it already carries is the useful one.
+      // Report credential service write failures.
       return this.recordFailure('WRITE_REFUSED', describe(error), true)
     }
 
@@ -644,16 +533,7 @@ export class Renewer {
     return { renewed: true, code: null, message: this.lastMessage }
   }
 
-  /**
-   * Adopt the WebVPN session a login opened, when it minted no new token.
-   *
-   * The tunnel cookie belongs to the session, not to the token: it is what makes
-   * the tunneled host answer, and it stays valid while the old token does. The
-   * two facts are therefore decided separately — only the token has to move for
-   * a renewal to count, and only the cookie has to exist for the transport to
-   * work off campus.
-   * @param outcome - what the login produced.
-   */
+  /** Adopt the WebVPN session a login opened, when it minted no new token. */
   private async adoptTunnelSession(outcome: LoginOutcome): Promise<void> {
     const cookie = outcome.ticketSource === 'webvpn' ? outcome.cookie : ''
     if (cookie === '') return
@@ -668,9 +548,6 @@ export class Renewer {
   /**
    * Run the authentication chain one transport selected.
    *
-   * Verification follows the same transport: a token minted by the tunnel is
-   * checked through the tunnel, and a direct login keeps the configured probe
-   * choice. Every other input is transport-independent.
    * @param mode - transport this attempt uses.
    * @param username - student id.
    * @param password - unified-auth password.
@@ -688,9 +565,6 @@ export class Renewer {
       password,
       fingerprint,
       handler: this.twoFactor.handler(),
-      ...this.options.renew.verifyAfterRenew
-        ? { verify: { model: this.options.renew.verifyModel, tunnel: mode === 'webvpn' || this.options.auth.tunnel } }
-        : {},
     }
     return mode === 'webvpn' ? await loginViaWebVpn(request) : await login(request)
   }
@@ -708,9 +582,7 @@ export class Renewer {
     this.phase = needsHuman ? 'needs-human' : 'error'
     this.lastCode = code
     this.lastMessage = text
-    // Exponential from the evaluation tick, so a gateway outage does not turn
-    // into a login attempt every minute, and a person who fixes the cause is
-    // never more than a click away from retrying by hand.
+    // Back off scheduled renewal failures.
     const steps = Math.min(this.failures, MAX_BACKOFF_STEPS)
     this.retryAt = Date.now() + this.options.renew.checkIntervalMs * 2 ** steps
     this.nextAttemptAt = this.retryAt
@@ -752,18 +624,7 @@ function describe(error: unknown): string {
   return truncate(message)
 }
 
-/**
- * Whether a direct-chain failure is the school's network gate rather than a
- * credential verdict.
- *
- * Off campus the direct host answers with a redirect into the unified-auth
- * form; depending on where the redirect was followed, the symptom is the OAuth
- * host name, the login page's own markup, or a ticket endpoint that returned
- * HTML instead of JSON. None of those say anything about the password, and all
- * of them are worth one retry through the tunnel in `auto` mode.
- * @param error - value the direct chain failed with.
- * @returns true when the tunnel is the plausible repair.
- */
+/** Recognize a campus login response from the SSO network gate. */
 function looksLikeGate(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error)
   return /thu-oauth|id\.tsinghua\.edu\.cn|sm2publicKey|<!doctype|<html|ticket was refused/iu.test(text)

@@ -1,20 +1,4 @@
-/**
- * Settings page for the Tsinghua MadModel credential and its transport.
- *
- * Three questions belong on one page because they are one subject: where model
- * requests are going (campus direct or WebVPN tunnel), whether the school token
- * behind them is alive, and what happens when the gateway refuses a request for
- * concurrency. The connection card groups local transport and the account used
- * to renew access.
- *
- * The account summary shows the configured student id. The password field
- * starts empty and stores only changes the user submits.
- *
- * Every control is a `ui-primitives` component; the layout follows the local
- * plugins' settings language: a 680px column, 16px cards with hairline
- * separators, and a monochrome ink scale.
- * @module dsh-thu-automad/client/SettingsSection
- */
+/** Account, renewal and model concurrency settings. */
 
 import { memo, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -376,14 +360,14 @@ function PoolRow({ pool, t }: { pool: TransportPoolStatus; t: TranslateNS<typeof
   const cooldown = useCountdown(pool.pausedUntil)
   const paused = pool.pausedUntil !== null && pool.pausedUntil > Date.now()
   const failure = poolFailureText(pool, t)
-  const tone: Tone = failure !== null ? 'error' : paused || pool.queued > 0 ? 'warn' : pool.inFlight > 0 ? 'ok' : 'idle'
-  const ceiling = pool.ceiling ?? pool.limit
-  const shrunk = pool.limit < ceiling ? ` · ${t('settings.queue.shrunk', { limit: String(pool.limit) })}` : ''
+  const { limit, starting = 0 } = pool
+  const pending = paused || pool.recovering === true || pool.queued > 0 || starting > 0
+  const tone: Tone = failure !== null ? 'error' : pending ? 'warn' : pool.inFlight > 0 ? 'ok' : 'idle'
   const statusText = failure ?? (paused && cooldown !== null
     ? t('settings.queue.cooldown', { remaining: cooldown })
-    : pool.queued > 0
-      ? t('settings.queue.waiting')
-      : t(pool.inFlight > 0 ? 'settings.queue.active' : 'settings.queue.normal'))
+    : pool.recovering === true ? t('settings.queue.recovering')
+      : starting > 0 ? t('settings.queue.starting', { count: String(starting) })
+        : t(pool.queued > 0 ? 'settings.queue.waiting' : pool.inFlight > 0 ? 'settings.queue.active' : 'settings.queue.normal'))
   return (
     <div className={css.row}>
       <div className={css.rowMain}>
@@ -391,9 +375,9 @@ function PoolRow({ pool, t }: { pool: TransportPoolStatus; t: TranslateNS<typeof
         <span className={css.rowHint}>
           {t('settings.queue.running', {
             inFlight: String(pool.inFlight),
-            limit: String(ceiling),
+            limit: String(limit),
             queued: String(pool.queued),
-          }) + shrunk}
+          })}
         </span>
       </div>
       <div className={css.rowValue}><Badge tone={tone} text={statusText} /></div>

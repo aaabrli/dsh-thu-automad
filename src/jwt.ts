@@ -1,14 +1,4 @@
-/**
- * Read the lifetime a credential states about itself.
- *
- * The madmodel gateway issues campus JWTs, so the expiry is a claim in the
- * token rather than something only the provider can answer: decoding the
- * payload yields an exact deadline with no network request and no clock
- * guessing. The signature is deliberately not verified — this plugin is not
- * the issuer and holds no key, and the value is a local hint whose ground
- * truth is a real provider response.
- * @module dsh-thu-automad/jwt
- */
+/** Read issue and expiry timestamps from a JWT payload. */
 
 /** Lifetime claims read from one token payload, in epoch milliseconds. */
 export interface TokenTimes {

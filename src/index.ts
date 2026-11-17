@@ -1,29 +1,4 @@
-/**
- * Host half of the Tsinghua MadModel automation plugin.
- *
- * Three capabilities that share one failure site are composed here:
- *
- * - **Watch** (`src/watch.ts`): what the stored credential says about itself,
- *   how much lifetime it has left, and whether the gateway has refused it.
- * - **Renew** (`src/renew.ts`): when that lifetime runs short, log in through
- *   the vendored authentication chain and write the replacement token.
- * - **Policy** (`src/policy/`): what a model request does when it fails — retry,
- *   switch, ask, give up, or, for a provider this plugin can re-authenticate,
- *   renew first and retry.
- *
- * They are one plugin because they are one decision. Separately, the watch sees
- * a 401 but cannot repair it, the policy sees a failure but cannot tell an
- * expired token from a truncated stream, and the renewal never learns that a
- * request just failed. Together, `{code: [AUTH]} → renew` becomes expressible:
- * re-authenticate on the spot, retry if it worked, ask a human only if it did
- * not.
- *
- * The browser half is reached through exact Fetch routes on the Host
- * Connection: one read-only status document, one two-factor answer, one manual
- * renewal trigger. The credential form itself writes through the shipped
- * `credentials` Remote namespace, so no route of ours touches a secret.
- * @module dsh-thu-automad
- */
+/** Register authentication, model transport, status routes and failure policies. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, RequestErrorAction } from '@deepseek-ai/dsh-agent'
@@ -33,6 +8,7 @@ import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type { GenerateOptions, LlmCallConfig, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm'
+import type { PiAiRequestHeaderContext } from '@deepseek-ai/dsh-llm-pi-ai'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import { DEVICE_NAME, loadAuth } from './auth/chain.ts'
 import { resolveOptions } from './config.ts'
@@ -47,7 +23,7 @@ import type {
 } from './protocol.ts'
 import { Renewer } from './renew.ts'
 import { TokenWatch } from './watch.ts'
-import { startTransportProxy } from './transport/proxy.ts'
+import { startTransportProxy, TITLE_REQUEST_HEADER } from './transport/proxy.ts'
 import type { RunningProxy } from './transport/proxy.ts'
 
 export { resolveOptions } from './config.ts'
@@ -113,10 +89,18 @@ export function apply(ctx: Context, config: unknown): void {
   // to read its live queue; one mutable holder keeps both in sync.
   const runtime: { proxy: RunningProxy | undefined } = { proxy: undefined }
 
-  // The loopback transport is what makes the provider row work on either
-  // network: the row points at this server, and the server picks the upstream
-  // (direct on campus, WebVPN tunnel off campus) per request.
+  // Serve the provider through the current campus or WebVPN route.
   if (options.transport.enabled) {
+    const baseURL = `http://127.0.0.1:${String(options.transport.port)}/v1`
+    ctx.on('llm-pi-ai/request-headers', (request: PiAiRequestHeaderContext, _headers: Headers, next: () => Headers) => {
+      const headers = next()
+      if (request.purpose !== 'session-title' || !providers.has(request.provider)
+        || request.baseURL.replace(/\/+$/u, '') !== baseURL) return headers
+      const marked = new Headers(headers)
+      marked.set(TITLE_REQUEST_HEADER, '1')
+      return marked
+    }, { global: true })
+
     ctx.effect(() => {
       let running: RunningProxy | undefined
       let disposed = false
@@ -124,24 +108,20 @@ export function apply(ctx: Context, config: unknown): void {
         port: options.transport.port,
         concurrency: options.transport.concurrency,
         resolveAuth: async () => {
-          const mode = await renewer.detectTransport()
           const resolved = await ctx.credentials.resolve(options.credentialRef)
           const token = resolved?.value.trim() ?? ''
           if (token === '') return null
-          const snapshot = renewer.transportSnapshot()
+          const mode = renewer.transportForRequest()
           return {
             token,
-            mode: mode === 'webvpn' ? 'webvpn' : 'direct',
-            cookie: mode === 'webvpn' ? snapshot.cookie : '',
-            tunnelPrefix: loadAuth().MADMODEL_VPN_PREFIX,
+            mode,
+            cookie: mode === 'webvpn' ? renewer.transportSnapshot().cookie : '',
+            tunnelPrefix: mode === 'webvpn' ? loadAuth().MADMODEL_VPN_PREFIX : '',
           }
         },
         refresh: async () => {
           renewer.clearBackoff()
-          // The transport decides from evidence, not from the cached decision
-          // the gate just contradicted: force the network probe, verify the
-          // stored tunnel session where one exists, and only then spend a login
-          // if the campus path or a live session cannot serve the request.
+          // Refresh network and tunnel state after a login redirect.
           const usable = await renewer.ensureTransport()
           if (!usable) {
             const status = renewer.snapshot()
@@ -161,7 +141,7 @@ export function apply(ctx: Context, config: unknown): void {
         running = proxy
         runtime.proxy = proxy
         const state = proxy.status()
-        renewer.noteProxy({ listening: state.listening, lastError: state.lastError, pools: state.pools })
+        renewer.noteProxy({ listening: state.listening, lastError: state.lastError })
         ctx.logger.info(
           `thu-automad: local transport at http://127.0.0.1:${String(options.transport.port)}/v1 `
           + `(mode ${options.transport.mode})`,
@@ -181,9 +161,7 @@ export function apply(ctx: Context, config: unknown): void {
     }, 'thu-automad: local transport')
   }
 
-  // The WebVPN tunnel drops an idle session sooner than the token expires, so
-  // without a keepalive a request would meet a login page while the renewal
-  // clock still says "valid".
+  // Keep the WebVPN session active between token renewals.
   if (options.transport.enabled) {
     ctx.effect(() => {
       const timer = setInterval(() => { void renewer.keepalive() }, options.transport.keepaliveMs)
@@ -194,6 +172,9 @@ export function apply(ctx: Context, config: unknown): void {
   ctx.effect(() => {
     // Read once at load so a token that is already due renews before the first
     // interval elapses.
+    void renewer.refreshFacts().catch((error: unknown) => {
+      ctx.logger.info(`thu-automad: could not restore transport session: ${String(error)}`)
+    })
     void renewer.tick()
     const timer = setInterval(() => { void renewer.tick() }, options.renew.checkIntervalMs)
     return () => {
@@ -202,9 +183,7 @@ export function apply(ctx: Context, config: unknown): void {
     }
   }, 'thu-automad: renewal schedule')
 
-  // The optional authenticated probe. It exists for a credential that is not a
-  // JWT and therefore states no expiry, where neither the clock nor a refusal
-  // can say whether it is still good.
+  // Optionally check credentials through a configured status endpoint.
   if (options.probe !== undefined) {
     const { intervalMs } = options.probe
     ctx.effect(() => {
@@ -216,9 +195,7 @@ export function apply(ctx: Context, config: unknown): void {
     }, 'thu-automad: credential probe')
   }
 
-  // Connection may activate after this plugin does, and `ctx.get` reads once
-  // rather than waiting. A composition without Connection still gets the watch,
-  // the schedule, and the policy; it only loses the browser reach.
+  // Register browser routes when Connection becomes available.
   ctx.inject(['connection'], (routeCtx) => {
     routeCtx.effect(
       () => registerRoutes(routeCtx, options, watch, renewer, ledger, runtime),
@@ -244,21 +221,13 @@ export function apply(ctx: Context, config: unknown): void {
     const now = Date.now()
     const key = stepKey(payload.turn, payload.step)
 
-    // A rule may let the retry owner wear this step out first. While the step
-    // has failed no more often than `afterRetries`, the failure is delegated
-    // untouched, so the retry owner's own budget — and the "(n/5)" progress the
-    // UI shows for it — stays in charge; the rule acts on the failure after
-    // that. Zero, the default, acts on the first failure.
+    // Apply delayed rules after the provider retry budget is spent.
     if (rule.afterRetries > 0 && steps.countFailure(key, now) <= rule.afterRetries) return await next()
 
-    // Nothing is remembered between failures: every one walks the rules again,
-    // so an outage that spans turns asks each time rather than quietly reusing
-    // the route an earlier answer picked.
+    // Evaluate the configured rules for this failure.
     let decision: Decision
     if (rule.action === 'renew') {
-      // Counted beside the action, not as one: what happened to the request is
-      // the resolution below, and this records that the credential was
-      // re-acquired on the way there.
+      // Record renewal attempts separately from request decisions.
       ledger.noteRenewal()
       decision = await renewFirst(ctx, renewer, payload, rule)
     } else {
@@ -284,9 +253,7 @@ export function apply(ctx: Context, config: unknown): void {
     steps.set(key, resolution.to, now)
     const downstream = await next()
     if (downstream !== undefined) return downstream
-    // Nothing else will retry, so grant the one attempt the switch needs. The
-    // claim names the target route, so a switch still applies when an earlier
-    // recovery of this step already spent the plain-retry slot.
+    // Apply the selected route on the next attempt of this step.
     if (!steps.claimOwn(key, routeTag(resolution.to), now)) {
       steps.forget(key)
       return undefined
@@ -304,11 +271,7 @@ export function apply(ctx: Context, config: unknown): void {
     return { ...seed, provider: to.provider, model: to.model }
   })
 
-  // Read the stored credential once at load. Without this the watch has no
-  // fingerprint until the first status read, so a refusal recorded by the very
-  // first model request could not be dated against the value that caused it —
-  // and a renewal would leave the pill red. The read owns nothing, so its
-  // effect has nothing to release.
+  // Read the current credential before tracking request outcomes.
   ctx.effect(() => {
     void watch.refresh()
     return () => {}
@@ -465,6 +428,7 @@ function transportStatusOf(
   options: AutomadOptions,
 ): TransportStatus {
   const transport = renewer.transportSnapshot()
+  const proxy = runtime.proxy?.status()
   return {
     enabled: transport.enabled,
     mode: transport.mode,
@@ -475,8 +439,8 @@ function transportStatusOf(
     tunnelCookieAt: transport.cookieAt,
     lastProbeAt: transport.probeAt,
     lastProbeVerdict: transport.probeVerdict,
-    pools: runtime.proxy?.status().pools ?? transport.pools,
-    queueEnabled: runtime.proxy?.status().queueEnabled,
+    pools: proxy?.pools ?? [],
+    queueEnabled: proxy?.queueEnabled,
     queueLimit: options.transport.concurrency.queueLimit,
   }
 }
@@ -495,9 +459,7 @@ async function renewFirst(
   payload: FailureFacts,
   rule: Rule,
 ): Promise<Decision> {
-  // The waterfall must not be held open indefinitely, and it must respect the
-  // turn's own cancellation. The two-factor budget is the long pole, so it
-  // bounds the whole attempt.
+  // Use the turn cancellation and the two-factor deadline for this renewal.
   const signal = AbortSignal.any([payload.signal, AbortSignal.timeout(BUDGET_MS)])
   const outcome = await renewer.ensureFresh('refusal', signal)
   if (outcome.renewed) return { resolution: { action: 'retry' }, asked: false }
@@ -567,9 +529,7 @@ async function ask(ctx: Context, payload: FailureFacts, spec: AskSpec): Promise<
       ? { resolution: resolutionOf(spec.unavailable), asked: false }
       : { resolution: resolutionOf(chosen), asked: true }
   } catch (_unanswerable) {
-    // A delegated child has no human answerer, a timeout expires, and a
-    // withdrawn question aborts: each falls back to the configured action
-    // rather than stalling the turn.
+    // Use the configured choice when a question is unavailable or expires.
     return { resolution: resolutionOf(spec.unavailable), asked: false }
   }
 }
@@ -585,9 +545,7 @@ async function authConfigStatus(ctx: Context, options: AutomadOptions): Promise<
   }))
   const of = (ref: CredentialRef): { configured: boolean; writable: boolean } =>
     described.find(entry => entry.ref === ref) ?? { configured: false, writable: true }
-  // The student id is not a secret the way the password is: the settings page
-  // shows it back so the user can confirm which account renewal will use. The
-  // password never leaves the credentials seam in a readable form.
+  // Show the account name used for renewal.
   const username = await ctx.credentials.resolve(options.auth.usernameRef)
   return {
     credentialRef: options.credentialRef,
@@ -652,17 +610,7 @@ function parseSettingsRequest(body: unknown): AuthSettingsRequest | null {
   }
 }
 
-/**
- * Write the identity a renewal logs in with.
- *
- * An empty or cleared field unsets the reference rather than storing an empty
- * string, because the seam treats an empty stored value as absent everywhere
- * and would otherwise leave a row that looks configured and is not.
- * @param ctx - context providing the credentials service.
- * @param options - validated plugin options.
- * @param request - the validated request.
- * @returns one entry per refused field; empty when every write succeeded.
- */
+/** Write the identity a renewal logs in with. */
 async function applySettings(
   ctx: Context,
   options: AutomadOptions,
@@ -680,9 +628,7 @@ async function applySettings(
       const message = error instanceof Error ? error.message : String(error)
       errors.push({
         field,
-        // The seam's own refusal to write over a launching-environment value is
-        // the one failure a user can act on, and it must not be flattened into
-        // a generic error.
+        // Return the credential service write error to settings.
         code: message.includes('read-only by the launching environment') ? 'shadowed' : 'refused',
         message,
       })

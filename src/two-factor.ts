@@ -1,19 +1,4 @@
-/**
- * Bridge between the vendored login chain's callback and a human in the Web UI.
- *
- * The chain asks for a two-factor answer by awaiting a promise. Nothing in the
- * Host can answer that, so this queue parks the question, publishes it on the
- * status route, and settles the promise when the browser posts an answer. The
- * timeout is what keeps a renewal from hanging forever when nobody is looking:
- * it settles with an empty answer, which the chain reads as "give up" and turns
- * into its own cancellation error.
- *
- * The school only raises this challenge for a device it does not already trust,
- * which in practice means the first login after the fingerprint is created and
- * again once its trust window lapses. There is deliberately no separate
- * "first login" flag: the challenge *is* the signal.
- * @module dsh-thu-automad/two-factor
- */
+/** Connect the authentication callback to the two-factor dialog. */
 
 import type { TwoFactorHandler, TwoFactorRequest, TwoFactorSelection } from './auth/chain.ts'
 import type { TwoFactorAnswer, TwoFactorPrompt } from './protocol.ts'
@@ -70,9 +55,7 @@ export class TwoFactorQueue {
   handler(): TwoFactorHandler {
     return async (request: TwoFactorRequest): Promise<string | TwoFactorSelection> => {
       if (this.pending !== null) {
-        // The chain never asks two questions at once; a second one means the
-        // previous renewal did not clean up, and answering the wrong promise
-        // would be worse than failing this attempt.
+        // Replace an outstanding question when the login starts a new one.
         throw new Error('thu-automad: a two-factor challenge is already outstanding')
       }
       return await new Promise<string | TwoFactorSelection>((resolve) => {
@@ -143,14 +126,7 @@ export class TwoFactorQueue {
     }
   }
 
-  /**
-   * Read when a challenge was last raised or answered, without clearing it.
-   *
-   * A successful renewal that ran while this value moved was attended by a
-   * human; one that ran while it stayed put proves the school still trusts the
-   * stored fingerprint.
-   * @returns epoch milliseconds, or null when no challenge has ever been raised.
-   */
+  /** Read the timestamp of the latest two-factor challenge. */
   challengeMark(): number | null {
     return this.lastChallengeAt
   }

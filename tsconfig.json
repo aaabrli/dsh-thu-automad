@@ -1,22 +1,11 @@
-/**
- * Standalone typecheck shape for this fork.
- *
- * Upstream's tsconfig extends the dsh monorepo's base config and points `paths`
- * at the checkout's declaration files, which do not exist outside that
- * repository. This fork is developed in its own directory, so the config here
- * is self-contained: it exists for editors and for an optional `tsc` run after
- * the harness declaration packages are available, not for the build (the build
- * only transpiles, via `build.mjs`).
- *
- * `strict` is kept so the source carries the same intent as upstream. A plain
- * `tsc -p` in this directory will report the `@deepseek-ai/*` imports as
- * missing until those declaration packages are installed; that is a property
- * of the host, not of the code.
- */
 {
   "compilerOptions": {
     "target": "ES2024",
-    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
@@ -27,7 +16,13 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": false,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src", "build.mjs", "checks", "tsdown.config.ts"]
+  "include": [
+    "src",
+    "build.mjs",
+    "checks"
+  ]
 }

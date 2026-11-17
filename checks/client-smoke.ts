@@ -1,19 +1,4 @@
-/**
- * Local behavioral check for the built browser half. It is not part of the
- * harness repository; run it from this package directory:
- *
- *   ../node_modules/.bin/tsx checks/client-smoke.ts
- *
- * The bundle is a closure factory the Web client's module table executes, so
- * this check reproduces that contract: stub `window.__ModuleLoader__` and the
- * injected `require`, load the artifact the client scan would read from
- * `package.json`, and drive the real `apply` against a stub browser Context.
- *
- * It also runs the components through a minimal hook runtime, because the
- * interesting browser-side behavior — a dialog that only appears when the Host
- * parked a question, a settings page that says whether a secret is stored —
- * lives in what the second render draws, not in what the first one returns.
- */
+/** Check the built UI with a simulated browser and component runtime. */
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -46,6 +31,10 @@ const styleTags: { dataset: Record<string, string>; textContent: string; removed
 const documentListeners = new Map<string, (() => void)[]>()
 
 Object.assign(globalThis, {
+  MutationObserver: class {
+    observe(): void {}
+    disconnect(): void {}
+  },
   window: {
     __ModuleLoader__: {
       load: (row: BootRow) => { booted = row },
@@ -54,8 +43,10 @@ Object.assign(globalThis, {
     clearInterval: () => {},
   },
   document: {
+    body: {},
     visibilityState: 'visible',
     head: { appendChild: () => {} },
+    querySelectorAll: () => [],
     addEventListener: (type: string, handler: () => void) => {
       documentListeners.set(type, [...documentListeners.get(type) ?? [], handler])
     },
@@ -99,13 +90,7 @@ const reactStub = {
   Fragment: Symbol('Fragment'),
 }
 
-/**
- * Render one component through the stub runtime.
- *
- * A state write from an effect is only visible on the next pass, which is the
- * same reason a real component renders twice; the check therefore returns the
- * tree after effects have had their chance to run.
- */
+/** Render a component and apply its queued effects. */
 function render<P>(component: unknown, props: P): unknown {
   hookIndex = 0
   pendingEffects = []
@@ -129,13 +114,7 @@ function resetHooks(): void {
 
 const descriptor = (type: unknown, props: Record<string, unknown> = {}): ElementDescriptor => ({ type, props })
 
-/**
- * Stand-in for one `ui-primitives` control.
- *
- * The primitive itself is the shell's business; what this plugin is responsible
- * for is *what it asked the primitive to show*, so each stub records its props
- * and {@link flatten} walks the children and footer it was handed.
- */
+/** Simulate a UI primitive by preserving its component props. */
 const primitive = (kind: string) => (props: Record<string, unknown>): ElementDescriptor => ({ type: kind, props })
 
 const MODULES: Record<string, unknown> = {
@@ -369,11 +348,8 @@ for (const slot of [...overlays, section]) {
   assert.equal(typeof slot.face.refresh, 'function', 'every posting seat can refresh the status')
 }
 
-// The stylesheet is mounted once, keyed so a hot reload cannot stack copies.
-// It must carry this plugin's own surfaces and no hand-rolled control: styling a
-// button here is what previously named a `--dsw-alias-button-*` token that does
-// not exist, and rendered the primary action as an unlabelled block.
-assert.equal(styleTags.length, 1)
+// The stylesheet is shared across plugin registrations.
+assert.equal(styleTags.length, 2)
 assert.equal(styleTags[0]?.dataset.plugin, 'dsh-thu-automad')
 const stylesheet = styleTags[0]?.textContent ?? ''
 assert.match(stylesheet, /\.taReading\b/u)
@@ -394,10 +370,7 @@ const baseProps = {
   t,
 }
 
-// ── the reading the status link renders ────────────────────────────────────
-
-// Before the first read settles there is nothing truthful to show; the link
-// around it is what stays visible, so this must not be an error or placeholder.
+// The reading appears after the first status response.
 resetHooks()
 assert.equal(render(reading.component, baseProps), null, 'nothing is drawn before the first read settles')
 
@@ -517,9 +490,7 @@ assert.ok(
   'a shadowed reference is called out on the page',
 )
 
-// A failure the Host reported as a stable code is described in the reader's
-// language. Echoing the Host's own English diagnostic into a Chinese page is a
-// page the reader has to translate.
+// Failure codes are translated by the UI locale.
 serve(status({
   renew: renew({ phase: 'needs-human', lastAttemptAt: Date.now(), lastCode: 'NO_CREDENTIALS', lastMessage: 'no student id or password is stored under MADMODEL_USERNAME / MADMODEL_PASSWORD' }),
 }))
@@ -529,9 +500,7 @@ const failed = textOf(flatten(render(section.component, sectionProps) as Element
 assert.match(failed, /No student id or password is stored yet/u, 'a known code renders localized copy')
 assert.doesNotMatch(failed, /no student id or password is stored under/u, 'not the Host\u2019s raw diagnostic')
 
-// The status popover is the shell's stat card, not a plugin skin: the same
-// four-row definition list, the same panel surface, and one concurrency reading
-// per model so a single "3 running" total cannot hide which model is saturated.
+// The status card displays a separate row for each model.
 serve(status({
   renew: renew({ phase: 'needs-human', lastAttemptAt: Date.now(), lastCode: 'NO_CREDENTIALS' }),
   transport: {
@@ -545,9 +514,9 @@ serve(status({
     lastProbeAt: Date.now() - 60_000,
     lastProbeVerdict: 'ok',
     pools: [
-      { model: 'DeepSeek-V4.1-Flash', limit: 3, ceiling: 3, inFlight: 3, queued: 0, pausedUntil: null },
-      { model: 'qwen3.8-27b', limit: 4, ceiling: 4, inFlight: 1, queued: 0, pausedUntil: null },
-      { model: 'DeepSeek-R1-W8A8', limit: 1, ceiling: 1, inFlight: 0, queued: 2, pausedUntil: Date.now() + 30_000 },
+      { model: 'DeepSeek-V4.1-Flash', limit: 3, inFlight: 3, queued: 1, recovering: true, pausedUntil: null },
+      { model: 'qwen3.8-27b', limit: 4, inFlight: 1, starting: 1, queued: 0, pausedUntil: null },
+      { model: 'DeepSeek-R1-W8A8', limit: 1, inFlight: 0, queued: 2, pausedUntil: Date.now() + 30_000 },
     ],
     queueLimit: 32,
   },
@@ -576,11 +545,11 @@ assert.deepEqual(
 assert.deepEqual(
   card.filter(node => node.type === 'span' && node.props.className === 'taPoolCount').map(node => node.props.children),
   ['3/3', '1/4', '0/1'],
-  'every model reports its own share of the ceiling',
+  'every model reports the currently enforced limit',
 )
 assert.deepEqual(
   card.filter(node => node.type === 'span' && node.props.className === 'taPoolQueued').map(node => node.props.children),
-  ['', '', '+2'],
+  ['+1', '', '+2'],
   'every row reserves its queue column',
 )
 const queuedIndex = card.findIndex(node => node.props.className === 'taPoolQueued' && node.props.children === '+2')
@@ -596,10 +565,12 @@ assert.equal(
 )
 assert.ok(
   card.some(node => node.type === 'span' && node.props.className === 'taPoolCount' && node.props['data-tone'] === 'warn'),
-  'a model at its ceiling is marked',
+  'a model at its applied limit is marked',
 )
-const paused = card.find(node => node.type === 'span' && node.props.className === 'taPoolPaused')
+const paused = card.find(node => node.props.className === 'taPoolPaused' && node.props['data-tone'] === 'error')
 assert.match(String(paused?.props.children), /429/u, 'a paused model shows how long its cooldown has left')
+assert.ok(card.some(node => node.props.className === 'taPoolPaused' && node.props.children === 'Checking capacity'))
+assert.ok(card.some(node => node.props.className === 'taPoolPaused' && node.props.children === 'Awaiting data · 1'))
 assert.match(String(human?.props.title), /student id/u, 'the renewal row explains the failure on hover')
 assert.match(stylesheet, /--dsw-specific-menu/u, 'the popover uses the shell\u2019s menu surface')
 assert.match(stylesheet, /--ta-accent/u, 'and draws its accent from a theme-aware token')
@@ -611,8 +582,12 @@ serve(status({
   transport: {
     enabled: true, mode: 'auto', effective: 'direct', port: 43110, listening: true,
     lastError: null, tunnelCookieAt: null, lastProbeAt: null, lastProbeVerdict: null,
-    pools: [{ model: 'DeepSeek-V4.1-Flash', limit: 3, ceiling: 3, inFlight: 0, queued: 0, pausedUntil: null,
-      upstreamError: { status: 502, at: Date.now() } }],
+    pools: [
+      { model: 'DeepSeek-V4.1-Flash', limit: 3, inFlight: 0, queued: 0, pausedUntil: null,
+        upstreamError: { status: 502, at: Date.now() } },
+      { model: 'qwen3.8-27b', limit: 4, inFlight: 0, queued: 0, pausedUntil: null },
+      { model: 'DeepSeek-R1-W8A8', limit: 1, inFlight: 0, queued: 0, pausedUntil: null },
+    ],
   },
 }))
 await repoll()
@@ -620,13 +595,25 @@ resetHooks()
 const unavailableCard = flatten(render(dock.component, { ...baseProps, renderSlot: () => null }) as ElementDescriptor)
 assert.ok(unavailableCard.some(node => node.props.className === 'taPoolCount' && node.props['data-tone'] === 'error'))
 assert.match(String(unavailableCard.find(node => node.props.className === 'taPool')?.props.title), /502/u)
+assert.equal(unavailableCard.filter(node => node.props.className === 'taPoolPaused'
+  && node.props.children === 'Upstream error').length, 1)
 resetHooks()
 const pendingPage = textOf(flatten(render(section.component, sectionProps) as ElementDescriptor))
 assert.match(pendingPage, /waiting for verification/u)
 assert.match(pendingPage, /Upstream service error \(HTTP 502\)/u)
 assert.doesNotMatch(pendingPage, /Last renewal failed/u)
 resetHooks()
-assert.match(textOf(flatten(render(reading.component, baseProps))), /upstream error/u)
+assert.match(textOf(flatten(render(reading.component, baseProps))), /verification pending/u)
+
+const partialOutage = source.getSnapshot().status?.transport
+assert.ok(partialOutage)
+serve(status({ transport: partialOutage }))
+await repoll()
+resetHooks()
+const tokenDuringOutage = render(reading.component, baseProps) as ElementDescriptor
+assert.equal(tokenDuringOutage.props['data-tone'], 'ok')
+assert.match(String((tokenDuringOutage.props.children as unknown[])[1]), /left$/u,
+  'the valid token stays visible during a model outage')
 
 for (const tokenState of ['expired', 'rejected', 'missing'] as const) {
   const failedStatus = status({
@@ -689,7 +676,7 @@ serve(status({
     tunnelCookieAt: null,
     lastProbeAt: null,
     lastProbeVerdict: null,
-    pools: [{ model: 'DeepSeek-V4.1-Flash', limit: 1, inFlight: 0, queued: 1, pausedUntil: Date.now() + 60_000 }],
+    pools: [{ model: 'DeepSeek-V4.1-Flash', limit: 3, inFlight: 0, queued: 1, pausedUntil: Date.now() + 60_000 }],
     queueLimit: 32,
   },
 }))
@@ -697,6 +684,7 @@ await repoll()
 resetHooks()
 const pausedPage = textOf(flatten(render(section.component, sectionProps) as ElementDescriptor))
 assert.match(pausedPage, /429 cooldown/u, 'a paused model says why it is not running')
+assert.match(pausedPage, /0 of 3 running/u)
 
 // ── the two-factor dialog ──────────────────────────────────────────────────
 
@@ -772,24 +760,15 @@ assert.equal(source.getSnapshot().unreachable, true, 'a rejected fetch leaves th
 
 // ── disposal ───────────────────────────────────────────────────────────────
 
-assert.equal(h.disposers.length, 3, 'dictionaries, stylesheet, and polling each own a disposer')
+assert.equal(h.disposers.length, 4, 'dictionaries, stylesheets and polling each own a disposer')
 for (const dispose of h.disposers) dispose()
 assert.equal(styleTags[0]?.removed, true, 'disposal removes the injected stylesheet')
+assert.equal(styleTags[1]?.removed, true, 'disposal removes the settings icon stylesheet')
 assert.equal((documentListeners.get('visibilitychange') ?? []).length, 0, 'disposal removes the focus listener')
 
 console.log('client-smoke: ok')
 
-/**
- * Every descriptor in one rendered tree, depth first.
- *
- * A function-typed element is invoked and its result walked, because the
- * interesting assertions are about what a helper component draws — the labelled
- * input inside `IdentityField`, the badge inside `Badge`. Those helpers are
- * stateless by construction, so invoking them here cannot disturb the hook
- * slots the outer component is still holding.
- * @param root - tree returned by {@link render}.
- * @returns every element it contains, helpers expanded.
- */
+/** Walk the rendered component tree depth first. */
 function flatten(root: unknown): ElementDescriptor[] {
   const found: ElementDescriptor[] = []
   const visit = (node: unknown): void => {

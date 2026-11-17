@@ -1,12 +1,4 @@
-/**
- * Turn an absolute deadline into live text on the reader's own clock.
- *
- * The Host publishes a deadline, never a countdown, so a slow poll cannot
- * shift the displayed figure. Recomputing here keeps that cost per second to
- * one string comparison: React bails out of the re-render whenever the
- * formatted text is unchanged.
- * @module dsh-thu-automad/client/use-countdown
- */
+/** Update a countdown from a host-provided deadline. */
 
 import { useEffect, useState } from 'react'
 import { formatRemaining } from './format.ts'

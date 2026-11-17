@@ -1,22 +1,4 @@
-/**
- * The two-factor dialog a renewal raises when the school does not trust this
- * device yet.
- *
- * This is the one place the plugin asks a human for input, and it exists
- * because a background login has nobody to answer the chain's callback. The
- * Host parks the question and publishes it; this component renders it and posts
- * the answer back. The two stages are separate round trips on purpose: the
- * school decides which methods are available only after the password step, and
- * the code is requested from the chosen method, so the second stage cannot be
- * predicted from the first.
- *
- * It is a `ui-primitives` `Modal`, so Escape, the mask click, focus return, and
- * the top-layer coordination with menus are the shell's shared behavior rather
- * than a second implementation. Dismissing it is a cancellation, not a silent
- * close: leaving the question unanswered would hold the renewal open until its
- * timeout.
- * @module dsh-thu-automad/client/TwoFactorDialog
- */
+/** Collect the verification method and code requested by campus SSO. */
 
 import { memo, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
@@ -76,10 +58,7 @@ export const TwoFactorDialog = memo(function TwoFactorDialog({
   const stage = prompt?.stage ?? null
   const offered = prompt?.methods.join(',') ?? ''
 
-  // A new stage or a new set of offered methods is a new question: keeping the
-  // previous answer would post a method the school never offered this time.
-  // Keyed on the joined names rather than the array, because every poll decodes
-  // a fresh array and would otherwise reset the form every few seconds.
+  // Reset the answer when the question stage or offered methods change.
   useEffect(() => {
     setError(null)
     setCode('')

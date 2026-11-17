@@ -1,17 +1,4 @@
-/**
- * Browser-side polling controller for the Host's merged status document.
- *
- * The controller owns the only subscription machinery in this plugin: it
- * fetches the status route, validates the decoded value at the wire boundary,
- * and republishes a stable snapshot only when something displayed changed.
- * Render code reads it through the slot framework's bound selector hook, so no
- * component contains a subscription of its own.
- *
- * The cadence is short because a two-factor challenge is raised by a background
- * renewal and has to reach the dialog while a human is still watching; a local
- * request every few seconds costs nothing next to that.
- * @module dsh-thu-automad/client/status
- */
+/** Poll host status and publish changes to UI subscribers. */
 
 import type { AutomadStatus } from '../protocol.ts'
 import { STATUS_PATH, isAutomadStatus, routeOf } from '../protocol.ts'
@@ -68,8 +55,7 @@ export class AutomadStatusController implements AutomadStatusSource {
   start(): () => void {
     void this.poll()
     this.timer = setInterval(() => { void this.poll() }, POLL_INTERVAL_MS)
-    // A credential pasted while the tab was hidden is worth learning about the
-    // moment the user looks back, rather than up to one interval later.
+    // Refresh when the application becomes visible.
     const onVisibilityChange = (): void => {
       if (document.visibilityState === 'visible') void this.poll()
     }
@@ -80,13 +66,7 @@ export class AutomadStatusController implements AutomadStatusSource {
     }
   }
 
-  /**
-   * Read the status route once and publish the outcome.
-   *
-   * Public so an action that just changed something can refresh immediately
-   * instead of waiting out the interval.
-   * @returns a promise settling once the read published.
-   */
+  /** Read the status route once and publish the outcome. */
   async poll(): Promise<void> {
     if (this.inFlight) return
     this.inFlight = true
@@ -125,16 +105,7 @@ export class AutomadStatusController implements AutomadStatusSource {
   }
 }
 
-/**
- * Whether two snapshots render identically.
- *
- * Compared as encoded text with the fields that move on every read removed:
- * the Host's own clock and its uptime are not things any component draws, and
- * including them would republish — and re-render — on every poll.
- * @param left - previous snapshot.
- * @param right - candidate snapshot.
- * @returns true when nothing a component draws changed.
- */
+/** Whether two snapshots render identically. */
 function sameSnapshot(left: AutomadSnapshot, right: AutomadSnapshot): boolean {
   if (left.unreachable !== right.unreachable) return false
   if (left.status === null || right.status === null) return left.status === right.status

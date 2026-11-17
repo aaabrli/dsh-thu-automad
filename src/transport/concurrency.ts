@@ -1,74 +1,234 @@
-/**
- * Admission-control knobs for the loopback transport.
- *
- * The school's gateway counts in-flight completions per account and refuses the
- * ones above its limit with a 429. That limit is upstream's, so the proxy cannot
- * raise it; what it can do is never exceed it, never surface the refusal to the
- * conversation, and use the capacity it does have without wasting slots.
- *
- * The values here are conservative starting points. The effective limit is
- * learned at runtime: it grows after a run of successes and halves on a 429, so
- * a deployment does not have to know today's number in advance.
- * @module dsh-thu-automad/transport/concurrency
- */
+import type { TransportPoolStatus } from '../protocol.ts'
 
-/** One model's admission policy. */
 export interface ConcurrencyOptions {
-  /** In-flight completions allowed before requests start queueing. */
-  initial: number
-  /** Ceiling the learned limit may grow to. */
   max: number
-  /** Floor the learned limit may shrink to. */
-  min: number
-  /**
-   * Per-model ceilings. The school limits each model separately (measured:
-   * V4.1-Flash 3, Qwen 3.8 4, R1 1), so a value here replaces both the initial
-   * limit and the ceiling for that model.
-   */
   perModel?: Readonly<Record<string, number>>
-  /** Consecutive completed requests before the limit grows by one. */
-  growAfter: number
-  /** Requests that may wait for a slot; beyond it new requests are refused. */
   queueLimit: number
-  /**
-   * Longest a request may wait for a slot, in milliseconds. `0` means no
-   * plugin-imposed limit: the request waits until a slot frees, the client
-   * disconnects, or the host's own request budget expires.
-   */
   maxWaitMs: number
-  /** Delay before a queued streaming request starts its keepalive comments. */
   heartbeatAfterMs: number
-  /** Interval between those keepalive comments. */
   heartbeatMs: number
-  /** First pause after a 429; doubles on each further 429. */
   cooldownMs: number
-  /** Ceiling for that pause. */
-  maxCooldownMs: number
 }
 
-/** Models the gateway advertises; seeded so every queue is visible before use. */
-export const KNOWN_MODELS = [
-  'DeepSeek-V4.1-Flash',
-  'qwen3.8-27b',
-  'DeepSeek-R1-W8A8',
-] as const
+export const KNOWN_MODELS = ['DeepSeek-V4.1-Flash', 'qwen3.8-27b', 'DeepSeek-R1-W8A8'] as const
 
-/** Documented defaults, restated in README.md and cordis.patch.yml. */
 export const CONCURRENCY_DEFAULTS = {
-  // The gateway's own per-model limit is 3 (madmodel's modelList.max_tokens).
-  // Start and cap there so the learned value never exceeds what the account can
-  // actually run; a 429 still halves it and it grows back after successes.
-  initial: 3,
   max: 3,
-  perModel: {},
-  min: 1,
-  growAfter: 4,
+  perModel: { 'qwen3.8-27b': 4, 'DeepSeek-R1-W8A8': 1 },
   queueLimit: 32,
-  // The user asked for "wait until it can continue", so no plugin-side ceiling:
-  // the wait ends when capacity appears or the caller gives up.
   maxWaitMs: 0,
   heartbeatAfterMs: 20_000,
   heartbeatMs: 15_000,
-  cooldownMs: 5_000,
-  maxCooldownMs: 120_000,
+  cooldownMs: 1_000,
 } as const satisfies ConcurrencyOptions
+
+export interface ModelSlot {
+  accepted(): void
+  started(): void
+  release(success: boolean): void
+}
+
+export interface ModelRequest {
+  model: string
+  order: number
+  title: boolean
+  signal: AbortSignal
+  onWait(): void
+}
+
+interface Waiter {
+  request: ModelRequest
+  grant(slot: ModelSlot): void
+  reject(error: unknown): void
+}
+
+interface GatewayWait {
+  retryAt: number
+  serverUntil: number
+  trial: ModelSlot | null
+}
+
+interface Pool {
+  limit: number
+  active: Map<ModelSlot, 'starting' | 'responding'>
+  queue: Waiter[]
+  gateway: GatewayWait | null
+  wake: ReturnType<typeof setTimeout> | undefined
+  upstreamError: { status: number | null; at: number } | null
+}
+
+export class QueueError extends Error {}
+
+/** Owns the fixed slots and waiting requests for each model. */
+export class ModelQueue {
+  private readonly pools = new Map<string, Pool>()
+  private enabled = true
+
+  constructor(private readonly options: ConcurrencyOptions) {
+    for (const model of KNOWN_MODELS) this.pool(model)
+  }
+
+  get queueEnabled(): boolean { return this.enabled }
+
+  snapshot(): TransportPoolStatus[] {
+    const now = Date.now()
+    return Array.from(this.pools, ([model, pool]) => ({
+      model,
+      limit: pool.limit,
+      inFlight: pool.active.size,
+      starting: [...pool.active.values()].filter(phase => phase === 'starting').length,
+      queued: pool.queue.length,
+      pausedUntil: pool.gateway !== null && pool.gateway.retryAt > now ? pool.gateway.retryAt : null,
+      recovering: pool.gateway?.trial != null && pool.gateway.retryAt <= now,
+      upstreamError: pool.upstreamError === null ? null : { ...pool.upstreamError },
+    }))
+  }
+
+  setEnabled(enabled: boolean): void {
+    if (this.enabled === enabled) return
+    this.enabled = enabled
+    for (const pool of this.pools.values()) {
+      if (!enabled) pool.gateway = null
+      this.pump(pool)
+    }
+  }
+
+  reset(): void {
+    for (const pool of this.pools.values()) {
+      clearTimeout(pool.wake)
+      pool.wake = undefined
+      pool.gateway = null
+      pool.active.clear()
+      for (const waiter of pool.queue.splice(0)) waiter.reject(new QueueError('the transport was reset'))
+    }
+  }
+
+  acquire(request: ModelRequest, retry: boolean): ModelSlot | Promise<ModelSlot> {
+    request.signal.throwIfAborted()
+    const pool = this.pool(request.model)
+    if (!this.enabled) return this.grant(pool)
+    const earlier = pool.queue.findIndex(({ request: other }) => request.title === other.title
+      ? request.order < other.order
+      : !request.title)
+    const index = earlier < 0 ? pool.queue.length : earlier
+    if (index === 0 && this.canStart(pool, request.title)) return this.grant(pool)
+    if (!retry && pool.queue.length >= this.options.queueLimit) {
+      throw new QueueError(`${pool.queue.length} requests are already waiting for "${request.model}"`)
+    }
+    return new Promise<ModelSlot>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const cleanup = (): void => {
+        clearTimeout(timer)
+        request.signal.removeEventListener('abort', onAbort)
+      }
+      const waiter: Waiter = {
+        request,
+        grant: (slot) => { cleanup(); resolve(slot) },
+        reject: (error) => { cleanup(); reject(error) },
+      }
+      const discard = (error: unknown): void => {
+        const position = pool.queue.indexOf(waiter)
+        if (position < 0) return
+        pool.queue.splice(position, 1)
+        waiter.reject(error)
+        this.pump(pool)
+      }
+      const onAbort = (): void => { discard(request.signal.reason) }
+      pool.queue.splice(index, 0, waiter)
+      request.signal.addEventListener('abort', onAbort, { once: true })
+      if (this.options.maxWaitMs > 0) {
+        timer = setTimeout(() => {
+          discard(new QueueError(`waited ${this.options.maxWaitMs} ms for "${request.model}"`))
+        }, this.options.maxWaitMs)
+      }
+      request.onWait()
+      this.pump(pool)
+    })
+  }
+
+  refused(model: string, slot: ModelSlot, retryAfterMs: number | null): void {
+    const pool = this.pool(model)
+    const now = Date.now()
+    const serverDelay = retryAfterMs ?? 0
+    const retryAt = now + (serverDelay > 0 ? serverDelay : this.options.cooldownMs)
+    const gateway = pool.gateway ??= { retryAt, serverUntil: 0, trial: null }
+    if (gateway.trial === slot) gateway.retryAt = retryAt
+    if (serverDelay > 0) gateway.serverUntil = Math.max(gateway.serverUntil, now + serverDelay)
+    gateway.retryAt = Math.max(gateway.retryAt, gateway.serverUntil)
+  }
+
+  noteUpstreamError(model: string, status: number | null): void {
+    this.pool(model).upstreamError = { status, at: Date.now() }
+  }
+
+  private pool(model: string): Pool {
+    const current = this.pools.get(model)
+    if (current !== undefined) return current
+    const specificLimit = this.options.perModel?.[model]
+    const pool: Pool = {
+      limit: typeof specificLimit === 'number' ? specificLimit : this.options.max,
+      active: new Map(),
+      queue: [],
+      gateway: null,
+      wake: undefined,
+      upstreamError: null,
+    }
+    this.pools.set(model, pool)
+    return pool
+  }
+
+  private canStart(pool: Pool, title: boolean): boolean {
+    if (!this.enabled) return true
+    const limit = title ? Math.max(1, pool.limit - 1) : pool.limit
+    const gateway = pool.gateway
+    return pool.active.size < limit
+      && (gateway === null || gateway.trial === null && Date.now() >= gateway.retryAt)
+  }
+
+  private grant(pool: Pool): ModelSlot {
+    const slot: ModelSlot = {
+      accepted: () => {
+        const gateway = pool.gateway
+        if (gateway?.trial !== slot) return
+        gateway.trial = null
+        if (Date.now() >= gateway.serverUntil) pool.gateway = null
+        this.pump(pool)
+      },
+      started: () => {
+        if (pool.active.has(slot)) pool.active.set(slot, 'responding')
+      },
+      release: (success) => {
+        if (!pool.active.delete(slot)) return
+        const gateway = pool.gateway
+        if (gateway?.trial === slot) gateway.trial = null
+        if (success) {
+          pool.upstreamError = null
+          // An actual completion frees capacity. Honor any deadline sent by the gateway.
+          if (gateway !== null) gateway.retryAt = gateway.serverUntil
+        }
+        this.pump(pool)
+      },
+    }
+    pool.active.set(slot, 'starting')
+    if (pool.gateway !== null) pool.gateway.trial = slot
+    return slot
+  }
+
+  private pump(pool: Pool): void {
+    clearTimeout(pool.wake)
+    pool.wake = undefined
+    for (;;) {
+      const waiter = pool.queue[0]
+      if (waiter === undefined) return
+      const delay = (pool.gateway?.retryAt ?? 0) - Date.now()
+      if (delay > 0) {
+        pool.wake = setTimeout(() => this.pump(pool), Math.min(delay, 2_147_483_647))
+        pool.wake.unref()
+        return
+      }
+      if (!this.canStart(pool, waiter.request.title)) return
+      pool.queue.shift()
+      waiter.grant(this.grant(pool))
+    }
+  }
+}

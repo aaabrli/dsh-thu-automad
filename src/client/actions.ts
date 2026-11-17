@@ -1,13 +1,4 @@
-/**
- * Write side of the browser half: the three POSTs the settings page and the
- * two-factor dialog make, plus the read that refreshes after them.
- *
- * Every call returns a value rather than throwing, because each has a defined
- * failure the caller renders. A network failure is `null`; a refusal keeps the
- * Host's stable code so the component picks localized copy instead of echoing a
- * diagnostic string.
- * @module dsh-thu-automad/client/actions
- */
+/** Settings, renewal and two-factor requests to the plugin host. */
 
 import {
   PROBE_PATH, RENEW_PATH, SETTINGS_PATH, TRANSPORT_CONTROL_PATH, TWO_FACTOR_PATH, routeOf,
@@ -65,16 +56,11 @@ export interface AutomadActions {
  */
 export function createActions(): AutomadActions {
   return {
-    saveIdentity: async request =>
-      await post<SettingsOutcome>(SETTINGS_PATH, request),
-    answerTwoFactor: async answer =>
-      await post<ActionOutcome>(TWO_FACTOR_PATH, answer),
-    renewNow: async () =>
-      await post<RenewTriggerOutcome>(RENEW_PATH, {}),
-    probeTransport: async () =>
-      await post<ProbeOutcome>(PROBE_PATH, {}),
-    controlTransport: async request =>
-      await post<TransportControlOutcome>(TRANSPORT_CONTROL_PATH, request),
+    saveIdentity: request => post<SettingsOutcome>(SETTINGS_PATH, request),
+    answerTwoFactor: answer => post<ActionOutcome>(TWO_FACTOR_PATH, answer),
+    renewNow: () => post<RenewTriggerOutcome>(RENEW_PATH, {}),
+    probeTransport: () => post<ProbeOutcome>(PROBE_PATH, {}),
+    controlTransport: request => post<TransportControlOutcome>(TRANSPORT_CONTROL_PATH, request),
   }
 }
 
@@ -87,13 +73,8 @@ async function post<T>(path: string, body: unknown): Promise<T | null> {
       body: JSON.stringify(body),
       cache: 'no-store',
     })
-    if (!response.ok) {
-      // A refusal body still carries the shape the caller renders when the Host
-      // explained itself; only an unexplained status is treated as unreachable.
-      const decoded: unknown = await response.json().catch(() => null)
-      return typeof decoded === 'object' && decoded !== null ? decoded as T : null
-    }
-    return await response.json() as T
+    const decoded: unknown = await response.json()
+    return typeof decoded === 'object' && decoded !== null ? decoded as T : null
   } catch (_routeUnreachable) {
     return null
   }

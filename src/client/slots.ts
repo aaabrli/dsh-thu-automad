@@ -1,13 +1,4 @@
-/**
- * The reading seat this plugin's status link declares inside itself.
- *
- * The link owns the pill chrome and the navigation, so whatever a deployment
- * wants shown inside it registers here instead of taking a second dock seat.
- * The declaration is what authorizes the render; a contributor only needs this
- * module's types, which is why the name and the {@link SlotMap} merge live
- * together in a module with no other imports.
- * @module dsh-thu-automad/client/slots
- */
+/** Declare the reading slot inside the status card button. */
 
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 

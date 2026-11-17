@@ -1,14 +1,4 @@
-/**
- * Local behavioral check for the merged failure policy. It is not part of the
- * harness repository; run it from this package directory:
- *
- *   ../node_modules/.bin/tsx checks/policy-smoke.ts
- *
- * It loads `src/index.ts` (no build step) and drives the real listeners against
- * the shared stub Context, so rule matching, delegation, the short-circuiting
- * `fail`, the two-event switch, `afterRetries`, the `ask` fallbacks, and the
- * new `renew` action are exercised rather than described.
- */
+/** Check failure rules, user choices and per-step retries. */
 
 import assert from 'node:assert/strict'
 import { apply, resolveOptions, resolveRules } from '../src/index.ts'
@@ -174,11 +164,7 @@ assert.throws(() => resolveOptions({ rules: [{ action: 'fail' }], checkIntervalM
   assert.equal(otherStep.delegated, 1, 'the budget is counted per step')
 }
 
-// ── nothing is remembered between failures ─────────────────────────────────
-
-// An answered switch applies to the step that needed it and is forgotten
-// afterwards: the next failure on the same provider walks the rules again and
-// asks, rather than silently reusing the route the human picked last time.
+// A selected route applies to the failed step.
 {
   const target = { provider: 'deepseek-official', model: 'deepseek-flash' }
   const h = await boot([{
@@ -200,10 +186,7 @@ assert.throws(() => resolveOptions({ rules: [{ action: 'fail' }], checkIntervalM
   assert.deepEqual(second.result, { kind: 'retry' }, 'and the fresh answer decides it')
 }
 
-// The reported sequence, end to end with the shipped rule shapes: an unanswered
-// SERVER/TRANSPORT question falls back to its configured switch, and the next
-// PI_AI_ERROR failure still has to ask once its retry budget is spent instead of
-// inheriting that route.
+// Each failure uses its own configured rule and retry budget.
 {
   const away = { provider: 'deepseek-official', model: 'deepseek-flash' }
   const h = await boot([
@@ -283,10 +266,7 @@ for (const [name, answer, options] of [
   assert.deepEqual(applied.result, { provider: 'deepseek-official', model: 'deepseek-flash' }, `${name} falls back to unavailable`)
 }
 
-// ── the renew action ───────────────────────────────────────────────────────
-
-// With no stored identity there is nothing to sign in with, so a `renew` rule
-// must fall through to its configured fallback rather than hold the waterfall.
+// Missing account details use the renewal rule fallback.
 {
   const h = await boot([{ when: { provider: ['tsinghua'], code: ['AUTH'] }, action: 'renew', onFailure: 'fail' }])
   const { result, delegated } = await fire(h, 'agent/request-error', failure('tsinghua', 'AUTH'), () => Promise.resolve('downstream'))

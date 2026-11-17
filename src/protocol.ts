@@ -1,13 +1,4 @@
-/**
- * The wire contract shared by this plugin's two halves.
- *
- * Nothing here touches Node or the browser: the Host half produces an
- * {@link AutomadStatus}, the browser half validates exactly that value after
- * decoding it, and both sides address the same route constants. The credential
- * value, the student id, the password, and the identity claims a campus JWT
- * carries never appear in any of these documents.
- * @module dsh-thu-automad/protocol
- */
+/** Shared host and browser API types and response validators. */
 
 import type { DecisionCounts, LastDecision, RuleSummary } from './policy/status.ts'
 
@@ -44,12 +35,7 @@ export function routeOf(path: string): string {
  */
 export const STATUS_ROUTE = routeOf(STATUS_PATH)
 
-/**
- * Token lifecycle as the browser presents it.
- *
- * `rejected` outranks the clock: a provider refusal is evidence, while `exp`
- * is only the issuer's intention.
- */
+/** Token lifecycle as the browser presents it. */
 export type TokenState = 'missing' | 'unknown' | 'ok' | 'expiring' | 'expired' | 'rejected'
 
 /**
@@ -193,25 +179,21 @@ export interface TransportPoolStatus {
   model: string
   /** In-flight completions currently allowed. */
   limit: number
-  /** Gateway ceiling for this model. */
-  ceiling?: number
   /** Completions currently running upstream. */
   inFlight: number
+  /** Of the in-flight requests, how many are waiting for their first upstream bytes. */
+  starting?: number
   /** Requests waiting for a slot. */
   queued: number
   /** Epoch milliseconds the 429 pause ends, or null when not paused. */
   pausedUntil: number | null
+  /** A single request is confirming available capacity after a 429 pause. */
+  recovering?: boolean
   /** Most recent upstream failure, cleared by a completed successful request. */
   upstreamError?: { status: number | null; at: number } | null
 }
 
-/**
- * Where model requests and renewals currently go.
- *
- * The direct host is only reachable from the campus network; the WebVPN tunnel
- * is reachable from anywhere but needs a cookie the renewal replaces. The
- * browser half shows this so a user can tell which path is live.
- */
+/** Where model requests and renewals currently go. */
 export interface TransportStatus {
   /** Whether the loopback `/v1` transport is served at all. */
   enabled: boolean
@@ -423,10 +405,12 @@ function isPoolList(value: unknown): boolean {
     const pool = entry as Record<string, unknown>
     return typeof pool.model === 'string'
       && typeof pool.limit === 'number' && Number.isFinite(pool.limit)
-      && (pool.ceiling === undefined || (typeof pool.ceiling === 'number' && Number.isFinite(pool.ceiling)))
       && typeof pool.inFlight === 'number' && Number.isFinite(pool.inFlight)
+      && (pool.starting === undefined || (typeof pool.starting === 'number'
+        && Number.isInteger(pool.starting) && pool.starting >= 0 && pool.starting <= pool.inFlight))
       && typeof pool.queued === 'number' && Number.isFinite(pool.queued)
       && isOptionalNumber(pool.pausedUntil)
+      && (pool.recovering === undefined || typeof pool.recovering === 'boolean')
       && (pool.upstreamError === undefined || isUpstreamError(pool.upstreamError))
   })
 }

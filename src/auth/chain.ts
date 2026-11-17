@@ -1,25 +1,5 @@
-/**
- * Loader and typed surface for the vendored Tsinghua authentication chain.
- *
- * The chain is reverse-engineered protocol knowledge — SM2-encrypted password
- * login, the school's two-factor handshake, ticket redemption — and this
- * package does not reimplement it. `vendor/madmodel/` holds a byte-identical
- * CommonJS copy with its SHA-256 recorded in `vendor/madmodel/README.md`, plus
- * a `package.json` marker that keeps the directory CommonJS despite the owning
- * package declaring `"type": "module"`. This module is the only place that
- * reaches it.
- *
- * It loads through `createRequire` rather than `import` on purpose. The module
- * installs a `globalThis.window.crypto` shim *before* it evaluates the vendored
- * SM2 library, because that library seeds its entropy pool at evaluation time
- * and would otherwise fall back to `Math.random` for the bytes that encrypt the
- * password. A static `import` would hoist the SM2 evaluation above the shim and
- * weaken the ciphertext silently. `require` is synchronous, so the transient
- * global it writes can never be observed by anything else.
- * @module dsh-thu-automad/auth/chain
- */
+/** Load the vendored Tsinghua authentication client. */
 
-import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
@@ -29,14 +9,7 @@ export const SSO_APP = 'd736f067a6705ab942df52f958a0f23b'
 /** Identity-provider host every login step starts from. */
 export const ID_PREFIX = 'https://id.tsinghua.edu.cn'
 
-/**
- * madmodel site the redeemed token belongs to.
- *
- * The ticket chain and the upstream probe both build their URLs from this
- * constant, so this — not the provider row's `baseURL` — is the host a renewal
- * talks to. The two are configured independently and are not cross-checked:
- * pointing the route elsewhere changes model requests only.
- */
+/** madmodel site the redeemed token belongs to. */
 export const SITE = 'https://madmodel.cs.tsinghua.edu.cn'
 
 /** Login form the direct path posts the encrypted password to. */
@@ -82,14 +55,7 @@ export interface TwoFactorSelection {
   trustDevice?: boolean
 }
 
-/**
- * Answer one two-factor question.
- *
- * At the method stage it returns a method id or a {@link TwoFactorSelection};
- * at the code stage it returns the six-digit code. A falsy or malformed answer
- * is how the chain is told to give up, which is why every path here must
- * eventually answer rather than hang.
- */
+/** Answer one two-factor question. */
 export type TwoFactorHandler = (request: TwoFactorRequest) => Promise<string | TwoFactorSelection>
 
 /** Cookie store the chain carries across redirects. */
@@ -161,18 +127,7 @@ export interface VendoredAuthClient {
     handler?: TwoFactorHandler,
     existingFormPage?: unknown,
   ): Promise<IdentityResult>
-  /**
-   * Run the whole WebVPN chain on this client: unified-auth login, WebVPN
-   * session, info-portal roaming, ticket redemption on the tunneled path.
-   *
-   * This is a *client* method, not a module function: the vendored entry exports
-   * the class and this chain hangs off an instance that owns the cookie jar the
-   * tunnel session lives in. Calling it as `auth.getMadModelToken(...)` throws
-   * before the first request, which is how the off-campus path can be dead on
-   * arrival while every offline check still passes.
-   * @param credentials - identity, fingerprint, and two-factor answerer.
-   * @returns the token and the tunnel cookie it must be used with.
-   */
+  /** Sign in through WebVPN and redeem the model gateway ticket. */
   getMadModelToken(credentials: WebVpnCredentials): Promise<WebVpnToken>
 }
 
@@ -205,13 +160,6 @@ export interface VendoredAuth {
   probeWebvpnSession(url: string, cookie: string): Promise<'ok' | 'invalid' | 'network'>
 }
 
-/** Candidate locations of the vendored entry, relative to this module. */
-const CANDIDATES = [
-  '../vendor/madmodel/madmodel-auth.js',
-  '../../vendor/madmodel/madmodel-auth.js',
-  './vendor/madmodel/madmodel-auth.js',
-]
-
 let loaded: VendoredAuth | undefined
 
 /**
@@ -221,17 +169,11 @@ let loaded: VendoredAuth | undefined
  */
 export function loadAuth(): VendoredAuth {
   if (loaded !== undefined) return loaded
-  const require = createRequire(import.meta.url)
-  for (const candidate of CANDIDATES) {
-    const path = fileURLToPath(new URL(candidate, import.meta.url))
-    if (!existsSync(path)) continue
-    loaded = require(path) as VendoredAuth
-    return loaded
-  }
-  throw new Error(
-    'thu-automad: the vendored authentication chain is missing; expected '
-    + 'vendor/madmodel/madmodel-auth.js inside the installed package',
-  )
+  const entry = new URL(import.meta.url.endsWith('.ts')
+    ? '../../vendor/madmodel/madmodel-auth.js'
+    : '../vendor/madmodel/madmodel-auth.js', import.meta.url)
+  loaded = createRequire(import.meta.url)(fileURLToPath(entry)) as VendoredAuth
+  return loaded
 }
 
 /**

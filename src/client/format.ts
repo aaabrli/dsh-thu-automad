@@ -1,11 +1,4 @@
-/**
- * Render a remaining lifetime as compact, monotonic-width text.
- *
- * The countdown is computed in the browser from the absolute deadline the Host
- * sent, so a slow poll never shifts the displayed figure and the Host never
- * has to publish a value per second.
- * @module dsh-thu-automad/client/format
- */
+/** Format token lifetime and renewal timestamps. */
 
 /** Milliseconds in one minute. */
 const MINUTE_MS = 60_000

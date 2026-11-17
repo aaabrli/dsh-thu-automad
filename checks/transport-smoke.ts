@@ -1,21 +1,11 @@
-/**
- * Behavioral check for the loopback transport.
- *
- * The proxy is the piece that lets the provider row work off campus, so the
- * cases here are the failure shapes that matter: a stale tunnel cookie must buy
- * exactly one re-authentication and one retry, the upstream must receive the
- * plugin's own Bearer and cookie rather than the provider's, SSE must reach the
- * client as it is produced, and a request without a configured token must fail
- * with a clear 503 instead of an empty success.
- *
- * Run from the package directory:
- *
- *   node node_modules/tsx/dist/cli.mjs checks/transport-smoke.ts
- */
+/** Check forwarding, streaming, per-model queues and cancellation. */
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import type { ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { startTransportProxy } from '../src/transport/proxy.ts'
+import { setTimeout as delay } from 'node:timers/promises'
+import { startTransportProxy, TITLE_REQUEST_HEADER } from '../src/transport/proxy.ts'
+import type { ProxyOptions, RunningProxy } from '../src/transport/proxy.ts'
 import { CONCURRENCY_DEFAULTS } from '../src/transport/concurrency.ts'
 import type { ConcurrencyOptions } from '../src/transport/concurrency.ts'
 
@@ -128,15 +118,7 @@ const proxy = await startTransportProxy({
 
 // ── the school's gate never reaches the provider ──────────────────────────
 
-/**
- * A gate that no re-authentication can resolve must be reported, not forwarded.
- *
- * This is the exact production shape: the tunnel answered `302 Location:
- * /login`, the proxy handed that response to the provider, and the provider —
- * which resolves a relative `Location` against its own baseURL — asked the
- * loopback for `/login` and got a 404. The turn then died reporting an
- * unsupported path, which says nothing about the missing session.
- */
+/** Report a login gate after one unsuccessful session recovery. */
 {
   let logins = 0
   const gate = createServer((request, response) => {
@@ -230,13 +212,7 @@ const proxy = await startTransportProxy({
   await new Promise<void>((resolve) => { silent.close(() => { resolve() }) })
 }
 
-/**
- * A tunnel without a session must sign in before it dispatches.
- *
- * Dispatching first can only earn the login page, and the recovery step is then
- * paid on top of the failed round trip. The provider waits; the school sees one
- * request instead of two.
- */
+/** Establish a WebVPN session before forwarding the completion. */
 {
   let signedIn = false
   let logins = 0
@@ -287,9 +263,7 @@ const proxy = await startTransportProxy({
   await new Promise<void>((resolve) => { tunnel.close(() => { resolve() }) })
 }
 
-// Model discovery is served by the loopback itself: no credential, no upstream
-// call, and no admission slot. This is the request shape an SDK picks when its
-// baseURL handling drops `/v1`, and it must not turn into a 404.
+// Serve the configured model catalogue locally.
 {
   const before = gateway.seen.length
   const response = await fetch(`http://127.0.0.1:${String(proxy.port)}/v1/models`)
@@ -369,9 +343,9 @@ await proxy.close()
     log: () => {},
   })
   const pools = perModel.status().pools
-  assert.equal(pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')?.ceiling, 3)
-  assert.equal(pools.find(pool => pool.model === 'qwen3.8-27b')?.ceiling, 4)
-  assert.equal(pools.find(pool => pool.model === 'DeepSeek-R1-W8A8')?.ceiling, 1)
+  assert.equal(pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')?.limit, 3)
+  assert.equal(pools.find(pool => pool.model === 'qwen3.8-27b')?.limit, 4)
+  assert.equal(pools.find(pool => pool.model === 'DeepSeek-R1-W8A8')?.limit, 1)
   assert.equal(pools.every(pool => pool.inFlight === 0), true, 'idle pools start empty')
   await perModel.close()
 }
@@ -416,6 +390,7 @@ async function startCompletionGateway(
 async function startQueueProxy(
   origin: string,
   concurrency: Partial<ConcurrencyOptions>,
+  overrides: Partial<Pick<ProxyOptions, 'resolveAuth'>> = {},
 ): Promise<Awaited<ReturnType<typeof startTransportProxy>>> {
   return await startTransportProxy({
     port: 0,
@@ -423,7 +398,69 @@ async function startQueueProxy(
     resolveAuth: async () => ({ token: TOKEN, mode: 'webvpn', cookie: GOOD_COOKIE, tunnelPrefix: origin }),
     refresh: async () => false,
     log: () => {},
+    ...overrides,
   })
+}
+
+/** Hold each upstream response until the test releases it. */
+async function startHeldGateway() {
+  const requests: { name: string; title: unknown; authorization: string | undefined; response: ServerResponse }[] = []
+  const server = createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      requests.push({
+        name: String(request.headers['x-check-request']),
+        title: request.headers[TITLE_REQUEST_HEADER],
+        authorization: request.headers.authorization,
+        response,
+      })
+    })
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  return {
+    origin: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`,
+    requests,
+    close: async () => {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    },
+  }
+}
+
+const flash = 'DeepSeek-V4.1-Flash'
+const readingOf = (proxy: RunningProxy) => {
+  const pool = proxy.status().pools.find(pool => pool.model === flash)
+  assert.ok(pool)
+  return pool
+}
+
+function sendCompletion(
+  proxy: RunningProxy, name: string, { signal, title = false }: { signal?: AbortSignal; title?: boolean } = {},
+): Promise<Response> {
+  return fetch(`http://127.0.0.1:${String(proxy.port)}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-check-request': name,
+      ...(title ? { [TITLE_REQUEST_HEADER]: '1' } : {}),
+    },
+    body: JSON.stringify({ model: flash, messages: [], stream: true }),
+    signal: signal === undefined ? AbortSignal.timeout(5_000) : signal,
+  })
+}
+
+async function until(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 2_500
+  while (!condition() && Date.now() < deadline) await delay(10)
+  assert.ok(condition(), message)
+}
+
+function finishStream(response: ServerResponse): void {
+  if (!response.headersSent) response.writeHead(200, { 'content-type': 'text/event-stream' })
+  response.end('data: [DONE]\n\n')
 }
 
 /**
@@ -434,8 +471,8 @@ async function startQueueProxy(
     finish(120, 'data: [DONE]\n\n')
   })
   const proxy = await startQueueProxy(gateway.origin, {
-    initial: 1, max: 1, min: 1, growAfter: 10, queueLimit: 8, maxWaitMs: 0,
-    heartbeatAfterMs: 1_000, heartbeatMs: 1_000, cooldownMs: 1_000, maxCooldownMs: 1_000,
+    max: 1, queueLimit: 8, maxWaitMs: 0,
+    heartbeatAfterMs: 1_000, heartbeatMs: 1_000, cooldownMs: 1_000,
   })
   const send = async (): Promise<number> => {
     const response = await fetch(`http://127.0.0.1:${String(proxy.port)}/v1/chat/completions`, {
@@ -479,8 +516,8 @@ async function startQueueProxy(
   server.unref()
   const origin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
   const proxy = await startQueueProxy(origin, {
-    initial: 1, max: 1, min: 1, growAfter: 10, queueLimit: 8, maxWaitMs: 0,
-    heartbeatAfterMs: 1_000, heartbeatMs: 1_000, cooldownMs: 20, maxCooldownMs: 40,
+    max: 1, queueLimit: 8, maxWaitMs: 0,
+    heartbeatAfterMs: 1_000, heartbeatMs: 1_000, cooldownMs: 20,
   })
   const response = await fetch(`http://127.0.0.1:${String(proxy.port)}/v1/chat/completions`, {
     method: 'POST',
@@ -495,18 +532,14 @@ async function startQueueProxy(
   await new Promise<void>((resolve) => { server.close(() => { resolve() }) })
 }
 
-/**
- * A refused request keeps its place in the queue, and one 429 no longer halves
- * the limit: the configured ceiling is already the gateway's own, so halving it
- * would only cost capacity the account still has.
- */
+// Extended upstream saturation does not reduce the model's slot limit.
 {
   let attempts = 0
   const server = createServer((request, response) => {
     request.resume()
     request.on('end', () => {
       attempts += 1
-      if (attempts <= 3) {
+      if (attempts <= 10) {
         response.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0' })
         response.end('{"error":{"type":"rate_limit_error","code":429}}')
         return
@@ -522,8 +555,8 @@ async function startQueueProxy(
   server.unref()
   const origin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
   const proxy = await startQueueProxy(origin, {
-    initial: 3, max: 3, min: 1, growAfter: 10, queueLimit: 8, maxWaitMs: 0,
-    heartbeatAfterMs: 20, heartbeatMs: 20, cooldownMs: 20, maxCooldownMs: 40,
+    max: 3, queueLimit: 8, maxWaitMs: 0,
+    heartbeatAfterMs: 20, heartbeatMs: 20, cooldownMs: 20,
   })
   const reading = () => proxy.status().pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')
   const response = await fetch(`http://127.0.0.1:${String(proxy.port)}/v1/chat/completions`, {
@@ -534,8 +567,8 @@ async function startQueueProxy(
   const text = await response.text()
   assert.equal(response.status, 200, 'the refused request is served once a slot frees')
   assert.match(text, /\[DONE\]/u)
-  assert.equal(attempts, 4, 'each refusal put the same request back in the queue')
-  assert.equal(reading()?.limit, 2, 'three refusals in a row are what halves the limit')
+  assert.equal(attempts, 11, 'each refusal put the same request back in the queue')
+  assert.equal(reading()?.limit, 3, 'the slot count comes from the model configuration')
   assert.equal(reading()?.queued, 0, 'nothing is left waiting after the answer')
   await proxy.close()
   await new Promise<void>((resolve) => { server.close(() => { resolve() }) })
@@ -550,8 +583,8 @@ async function startQueueProxy(
     finish(700, 'data: [DONE]\n\n')
   })
   const proxy = await startQueueProxy(gateway.origin, {
-    initial: 1, max: 1, min: 1, growAfter: 10, queueLimit: 8, maxWaitMs: 0,
-    heartbeatAfterMs: 50, heartbeatMs: 50, cooldownMs: 1_000, maxCooldownMs: 1_000,
+    max: 1, queueLimit: 8, maxWaitMs: 0,
+    heartbeatAfterMs: 50, heartbeatMs: 50, cooldownMs: 1_000,
   })
   const send = (): Promise<Response> => fetch(`http://127.0.0.1:${String(proxy.port)}/v1/chat/completions`, {
     method: 'POST',
@@ -578,8 +611,8 @@ async function startQueueProxy(
     finish(600, 'data: [DONE]\n\n')
   })
   const proxy = await startQueueProxy(gateway.origin, {
-    initial: 1, max: 1, min: 1, growAfter: 10, queueLimit: 1, maxWaitMs: 0,
-    heartbeatAfterMs: 1_000, heartbeatMs: 1_000, cooldownMs: 1_000, maxCooldownMs: 1_000,
+    max: 1, queueLimit: 1, maxWaitMs: 0,
+    heartbeatAfterMs: 1_000, heartbeatMs: 1_000, cooldownMs: 1_000,
   })
   const send = (): Promise<Response> => fetch(`http://127.0.0.1:${String(proxy.port)}/v1/chat/completions`, {
     method: 'POST',
@@ -599,57 +632,184 @@ async function startQueueProxy(
   await gateway.close()
 }
 
-/**
- * A client that disconnects while its completion is open must return the slot.
- * Without that, an aborted turn leaves a phantom "in flight" request and every
- * later conversation waits for capacity that nothing is using.
- */
-{
-  const hanging = createServer((request, response) => {
-    request.resume()
-    request.on('end', () => {
-      response.writeHead(200, { 'content-type': 'text/event-stream' })
-      response.write(': still open\n\n')
-      // Deliberately no end: the client is the one that walks away.
-    })
-  })
-  await new Promise<void>((resolve, reject) => {
-    hanging.once('error', reject)
-    hanging.listen(0, '127.0.0.1', () => { resolve() })
-  })
-  const origin = `http://127.0.0.1:${String((hanging.address() as AddressInfo).port)}`
-  const proxy = await startQueueProxy(origin, {
-    initial: 1, max: 1, min: 1, growAfter: 10, queueLimit: 8, maxWaitMs: 0,
-    heartbeatAfterMs: 1_000, heartbeatMs: 1_000, cooldownMs: 1_000, maxCooldownMs: 1_000,
-  })
-  const send = (signal?: AbortSignal): Promise<Response> => fetch(
-    `http://127.0.0.1:${String(proxy.port)}/v1/chat/completions`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'DeepSeek-V4.1-Flash', messages: [], stream: true }),
-      ...(signal === undefined ? {} : { signal }),
-    },
-  )
-
+// Stopping a completion closes the upstream connection as well as its slot.
+for (const streaming of [false, true]) {
+  const held = await startHeldGateway()
+  const proxy = await startQueueProxy(held.origin, { max: 1 })
   const controller = new AbortController()
-  const first = await send(controller.signal)
-  assert.equal(first.status, 200)
-  controller.abort()
-  await new Promise(resolve => setTimeout(resolve, 150))
-  assert.equal(proxy.status().pools.find(pool => pool.model === 'DeepSeek-V4.1-Flash')?.upstreamError, null,
-    'a user cancellation is not reported as an upstream outage')
+  const result = sendCompletion(proxy, 'cancelled', { signal: controller.signal }).catch(error => error)
+  try {
+    await until(() => held.requests.length === 1, 'the gateway received the request')
+    const { response } = held.requests[0]
+    if (streaming) {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write('data: partial\n\n')
+      assert.equal((await result).status, 200)
+    }
+    assert.equal(readingOf(proxy).inFlight, 1)
+    controller.abort()
+    await until(() => response.destroyed && readingOf(proxy).inFlight === 0, 'both gateway and proxy released the request')
+    assert.equal(readingOf(proxy).upstreamError, null, 'a cancellation does not report an upstream outage')
+    const next = sendCompletion(proxy, 'next')
+    await until(() => held.requests.length === 2, 'the next request uses the freed slot')
+    finishStream(held.requests[1].response)
+    assert.match(await (await next).text(), /\[DONE\]/u)
+  } finally {
+    controller.abort()
+    await proxy.close()
+    await held.close()
+  }
+}
 
-  const second = await Promise.race([
-    send(),
-    new Promise<never>((_resolve, reject) => {
-      setTimeout(() => { reject(new Error('the aborted request leaked its admission slot')) }, 1_500)
+// Three overlapping 429s are one cooldown. Older requests keep their place even with a full queue.
+{
+  const held = await startHeldGateway()
+  const proxy = await startQueueProxy(held.origin, { queueLimit: 1, cooldownMs: 50 })
+  const pending: Promise<Response>[] = []
+  try {
+    for (const name of ['a', 'b', 'c']) {
+      pending.push(sendCompletion(proxy, name))
+      await until(() => held.requests.length === pending.length, 'the model used its configured slots')
+    }
+    pending.push(sendCompletion(proxy, 'd'))
+    await until(() => readingOf(proxy).queued === 1, 'the new-request queue is full')
+    for (const { response } of held.requests.slice(0, 3).reverse()) {
+      response.writeHead(429, { 'retry-after': '1', 'content-type': 'application/json' })
+      response.end('{}')
+    }
+    await until(() => readingOf(proxy).queued === 4, 'all previously admitted requests can requeue')
+    const cooling = readingOf(proxy)
+    assert.equal(cooling.limit, 3, 'overlapping refusals count as one cooldown')
+    assert.ok((cooling.pausedUntil ?? 0) - Date.now() > 500, 'the gateway Retry-After is respected')
+    await until(() => held.requests.length === 4, 'the cooldown starts one trial')
+    await delay(50)
+    assert.equal(held.requests.length, 4, 'other requests wait for the trial response')
+    assert.equal(held.requests[3].name, 'a', 'the oldest refused request goes first')
+    assert.equal(readingOf(proxy).recovering, true)
+    held.requests[3].response.writeHead(200, { 'content-type': 'text/event-stream' })
+    held.requests[3].response.flushHeaders()
+    await until(() => held.requests.length === 6, 'an accepted trial reopens free slots while its stream is still open')
+    assert.deepEqual(held.requests.slice(4, 6).map(request => request.name).sort(), ['b', 'c'])
+    held.requests.slice(3, 6).forEach(({ response }) => finishStream(response))
+    await until(() => held.requests.length === 7, 'the waiting newcomer is then sent')
+    assert.equal(held.requests[6].name, 'd')
+    finishStream(held.requests[6].response)
+    await Promise.all(pending.map(async result => assert.match(await (await result).text(), /\[DONE\]/u)))
+  } finally {
+    await proxy.close()
+    await held.close()
+    await Promise.allSettled(pending)
+  }
+}
+
+// A title waits behind a conversation when there is only one free slot.
+{
+  const held = await startHeldGateway()
+  const proxy = await startQueueProxy(held.origin, {})
+  const pending: Promise<Response>[] = []
+  try {
+    pending.push(sendCompletion(proxy, 'chat-a'), sendCompletion(proxy, 'chat-b'))
+    await until(() => held.requests.length === 2, 'two chats are in progress')
+    pending.push(sendCompletion(proxy, 'title', { title: true }))
+    await until(() => readingOf(proxy).queued === 1, 'title waits for spare capacity')
+    pending.push(sendCompletion(proxy, 'chat-c'))
+    await until(() => held.requests.length === 3, 'chat starts without waiting behind the title')
+    assert.equal(held.requests[2].name, 'chat-c')
+    finishStream(held.requests[0].response)
+    finishStream(held.requests[1].response)
+    await until(() => held.requests.length === 4, 'title starts when capacity becomes available')
+    assert.equal(held.requests[3].name, 'title')
+    assert.equal(held.requests[3].title, undefined, 'the local title marker stays inside the proxy')
+    finishStream(held.requests[2].response)
+    finishStream(held.requests[3].response)
+    await Promise.all(pending.map(async result => assert.match(await (await result).text(), /\[DONE\]/u)))
+  } finally {
+    await proxy.close()
+    await held.close()
+    await Promise.allSettled(pending)
+  }
+}
+
+// A completion opens the queue immediately and the retry reads the current token.
+{
+  const held = await startHeldGateway()
+  let currentToken = TOKEN
+  const proxy = await startQueueProxy(held.origin, { cooldownMs: 30_000 }, {
+    resolveAuth: async () => ({
+      token: currentToken, mode: 'webvpn', cookie: GOOD_COOKIE, tunnelPrefix: held.origin,
     }),
-  ])
-  assert.equal(second.status, 200, 'the slot is returned after the client disconnects')
-  await proxy.close()
-  hanging.closeAllConnections()
-  await new Promise<void>((resolve) => { hanging.close(() => { resolve() }) })
+  })
+  try {
+    const running = sendCompletion(proxy, 'running')
+    await until(() => held.requests.length === 1, 'the first request occupies a slot')
+    const refused = sendCompletion(proxy, 'refused')
+    await until(() => held.requests.length === 2, 'there is spare local capacity for the second request')
+    held.requests[1].response.writeHead(429)
+    held.requests[1].response.end()
+    await until(() => readingOf(proxy).queued === 1, 'the gateway refusal put the request back in the queue')
+    assert.ok((readingOf(proxy).pausedUntil ?? 0) - Date.now() > 25_000)
+    currentToken = 'renewed-fixture-token'
+    finishStream(held.requests[0].response)
+    await until(() => held.requests.length === 3, 'the actual completion wakes the queue without the fallback wait')
+    assert.equal(held.requests[2].name, 'refused')
+    assert.equal(held.requests[2].authorization, `Bearer ${currentToken}`)
+    finishStream(held.requests[2].response)
+    await Promise.all([running, refused].map(async result => assert.match(await (await result).text(), /\[DONE\]/u)))
+  } finally {
+    await proxy.close()
+    await held.close()
+  }
+}
+
+// Cancelling a locally queued request removes it before the next slot opens.
+{
+  const held = await startHeldGateway()
+  const proxy = await startQueueProxy(held.origin, { max: 1 })
+  const controller = new AbortController()
+  try {
+    const running = sendCompletion(proxy, 'running')
+    await until(() => held.requests.length === 1, 'the first request occupies the slot')
+    const waiting = sendCompletion(proxy, 'waiting', { signal: controller.signal }).catch(error => error)
+    await until(() => readingOf(proxy).queued === 1, 'the second request is queued')
+    controller.abort()
+    assert.equal((await waiting).name, 'AbortError')
+    await until(() => readingOf(proxy).queued === 0, 'the canceled request is removed')
+    finishStream(held.requests[0].response)
+    assert.match(await (await running).text(), /\[DONE\]/u)
+    assert.equal(held.requests.length, 1, 'the canceled request never reaches the gateway')
+  } finally {
+    controller.abort()
+    await proxy.close()
+    await held.close()
+  }
+}
+
+// An idle slot forwards the first real chunk while the upstream stream is still open.
+{
+  const held = await startHeldGateway()
+  const proxy = await startQueueProxy(held.origin, { max: 1 })
+  try {
+    const pending = sendCompletion(proxy, 'first')
+    await until(() => held.requests.length === 1, 'the request is dispatched without queueing')
+    const { response } = held.requests[0]
+    assert.equal(readingOf(proxy).queued, 0)
+    assert.equal(readingOf(proxy).starting, 1)
+    response.writeHead(200, { 'content-type': 'text/event-stream' })
+    response.write('data: {"choices":[{"delta":{"content":"1"}}]}\n\n')
+    const streaming = await pending
+    assert.equal(streaming.status, 200)
+    const reader = streaming.body?.getReader()
+    assert.ok(reader)
+    const first = await reader.read()
+    assert.match(new TextDecoder().decode(first.value), /"content":"1"/u)
+    assert.equal(response.writableEnded, false, 'the gateway is still generating')
+    assert.equal(readingOf(proxy).starting, 0)
+    finishStream(response)
+    while (!(await reader.read()).done) { /* consume the end of the same stream */ }
+  } finally {
+    await proxy.close()
+    await held.close()
+  }
 }
 
 await gateway.close()
@@ -661,8 +821,16 @@ await gateway.close()
   let truncate = false
   let sends = 0
   const service = createServer((request, response) => {
-    request.resume()
+    let body = ''
+    request.setEncoding('utf8')
+    request.on('data', chunk => { body += String(chunk) })
     request.on('end', () => {
+      const { model } = JSON.parse(body) as { model: string }
+      if (model !== flash) {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ choices: [{ message: { content: model } }] }))
+        return
+      }
       sends += 1
       if (truncate) {
         response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -678,9 +846,9 @@ await gateway.close()
   await new Promise<void>(resolve => service.listen(0, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${String((service.address() as AddressInfo).port)}`
   const healthProxy = await startQueueProxy(origin, { ...CONCURRENCY_DEFAULTS })
-  const send = () => fetch(`http://127.0.0.1:${String(healthProxy.port)}/v1/chat/completions`, {
+  const send = (model: string = flash) => fetch(`http://127.0.0.1:${String(healthProxy.port)}/v1/chat/completions`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'DeepSeek-V4.1-Flash', messages: [], stream: false }),
+    body: JSON.stringify({ model, messages: [], stream: false }),
   })
   try {
     const failed = await send()
@@ -690,7 +858,14 @@ await gateway.close()
     assert.equal(pool?.upstreamError?.status, 502)
     assert.equal(pool?.queued, 0)
     assert.equal(sends, 1, 'a 502 is not replayed by a second retry loop')
-    assert.equal(healthProxy.status().pools.find(pool => pool.model === 'qwen3.8-27b')?.upstreamError, null)
+    await Promise.all(['qwen3.8-27b', 'DeepSeek-R1-W8A8'].map(async model => {
+      const healthy = await send(model)
+      assert.equal(healthy.status, 200)
+      const answer = await healthy.json() as { choices: [{ message: { content: string } }] }
+      assert.equal(answer.choices[0].message.content, model)
+      assert.equal(healthProxy.status().pools.find(pool => pool.model === model)?.upstreamError, null)
+    }))
+    assert.equal(readingOf(healthProxy).upstreamError?.status, 502, 'healthy models do not change Flash health')
     upstreamStatus = 200
     const recovered = await send()
     await recovered.text()

@@ -1,17 +1,4 @@
-/**
- * Reading this plugin's status link renders inside itself.
- *
- * It rides that link's `conversation.composer.statusPillReading` seat, so the
- * token deadline stays visible exactly where the user works. The reading
- * renders nothing until the first status read settles; the link around it stays
- * visible either way.
- *
- * A renewal that is in flight is what the amber reading means when the token is
- * still comfortably valid, so the reading says "renewing" rather than showing a
- * bare countdown — otherwise the one moment the plugin is doing something looks
- * identical to the moment it is not.
- * @module dsh-thu-automad/client/Reading
- */
+/** Render token and queue status below the composer. */
 
 import { memo } from 'react'
 import type {
@@ -55,8 +42,7 @@ export const Reading = memo(function Reading({ useAutomadStatus, t }: ReadingPro
   const remaining = useCountdown(status?.token.expiresAt ?? null)
   const cooldownUntil = nearestCooldown(status)
   const cooldown = useCountdown(cooldownUntil)
-  // Before the first read settles there is nothing truthful to show. The link
-  // that renders this seat keeps its own content, so nothing here hides it.
+  // Display the reading after the first status response.
   if (status === null && !unreachable) return null
   const shown: Presentation = status === null
     ? { text: t('pill.unavailable'), tone: 'idle' }
@@ -102,9 +88,6 @@ function presentationOf(
     case 'missing': return { text: t('pill.missing', { label }), tone: 'idle' }
   }
   const pools = transport?.pools ?? []
-  if (pools.some(pool => pool.upstreamError != null)) {
-    return { text: t('pill.upstreamError', { label }), tone: 'error' }
-  }
   const paused = pools.some(pool => pool.pausedUntil !== null && pool.pausedUntil > Date.now())
   if (paused) {
     return {

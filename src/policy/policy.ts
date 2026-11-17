@@ -1,8 +1,4 @@
-/**
- * Rule matching and the per-step route override the recovery writes and the
- * next request reads.
- * @module dsh-thu-automad/policy/policy
- */
+/** Match failure rules and apply per-step retry and route choices. */
 
 import type { Choice, Resolution, Route, Rule } from './config.ts'
 
@@ -45,13 +41,7 @@ export function substitute(text: string, values: Readonly<Record<string, string>
   return text.replace(/\{(\w+)\}/gu, (match, name: string) => values[name] ?? match)
 }
 
-/**
- * Route overrides and self-granted attempts, keyed by one turn and step.
- *
- * A switch is decided while a request is failing and consumed when the loop
- * re-runs its request waterfall, so the two halves are joined here rather than
- * threaded through the event payloads.
- */
+/** Route overrides and self-granted attempts, keyed by one turn and step. */
 export class StepRoutes {
   private readonly overrides = new Map<string, { to: Route; at: number }>()
   private readonly owned = new Map<string, number>()
@@ -88,16 +78,7 @@ export class StepRoutes {
     this.overrides.delete(key)
   }
 
-  /**
-   * Count one more failure of a step, for a rule that retries before it acts.
-   *
-   * The count is kept per turn and step rather than per rule: a retried step
-   * re-enters the failure listener with the same identity, and a step that
-   * succeeds never comes back here at all.
-   * @param key - turn and step identity.
-   * @param now - current epoch milliseconds.
-   * @returns how many times this step has failed, including this one.
-   */
+  /** Count one more failure of a step, for a rule that retries before it acts. */
   countFailure(key: string, now: number): number {
     this.prune(now)
     const count = (this.failures.get(key)?.count ?? 0) + 1
@@ -105,19 +86,7 @@ export class StepRoutes {
     return count
   }
 
-  /**
-   * Claim the single attempt this plugin grants for one recovery of a step.
-   *
-   * The claim is per recovery kind rather than per step: a plain retry and a
-   * switch to a named route are different requests, so a switch decided after
-   * the retry slot was spent must still be able to apply itself. Each kind is
-   * granted at most once per step, which is what keeps a failing route from
-   * looping.
-   * @param key - turn and step identity.
-   * @param kind - recovery kind; a switch uses its target route's own tag.
-   * @param now - current epoch milliseconds.
-   * @returns true when this caller claimed it, false when it was already taken.
-   */
+  /** Claim the single attempt this plugin grants for one recovery of a step. */
   claimOwn(key: string, kind: string, now: number): boolean {
     this.prune(now)
     const slot = `${key}#${kind}`
